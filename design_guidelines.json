@@ -1,0 +1,150 @@
+{
+  "identity": {
+    "name": "Trace Analyst",
+    "description": "AI-powered OSINT investigation platform for intelligence professionals.",
+    "tone": "Professional, High-Tech, Secure, Precision-Focused, Dark Mode Only",
+    "audience": "Intelligence Analysts, Security Researchers, Investigators"
+  },
+  "typography": {
+    "primary_font": "Manrope",
+    "secondary_font": "JetBrains Mono",
+    "heading_font": "Rajdhani",
+    "scale": {
+      "h1": "text-4xl md:text-5xl font-bold tracking-tight",
+      "h2": "text-3xl font-semibold tracking-tight",
+      "h3": "text-2xl font-medium tracking-normal",
+      "body": "text-base font-normal leading-relaxed",
+      "caption": "text-sm font-medium text-muted-foreground uppercase tracking-widest",
+      "code": "font-mono text-sm"
+    },
+    "imports": [
+      "@fontsource/manrope",
+      "@fontsource/jetbrains-mono",
+      "@fontsource/rajdhani"
+    ]
+  },
+  "colors": {
+    "palette": {
+      "background": {
+        "DEFAULT": "#0a1628",
+        "secondary": "#0d1b2a",
+        "tertiary": "#112240"
+      },
+      "primary": {
+        "DEFAULT": "#00d9ff",
+        "foreground": "#000000",
+        "hover": "#00b8d9"
+      },
+      "secondary": {
+        "DEFAULT": "#14f195",
+        "foreground": "#000000"
+      },
+      "accent": {
+        "DEFAULT": "#00d9ff",
+        "purple": "#7c3aed", 
+        "orange": "#f97316"
+      },
+      "destructive": {
+        "DEFAULT": "#ff3b30",
+        "foreground": "#ffffff"
+      },
+      "muted": {
+        "DEFAULT": "#1e293b",
+        "foreground": "#94a3b8"
+      },
+      "border": "rgba(0, 217, 255, 0.2)",
+      "glass": "rgba(10, 22, 40, 0.7)"
+    },
+    "gradients": {
+      "glow": "radial-gradient(circle at center, rgba(0, 217, 255, 0.15) 0%, transparent 70%)",
+      "scanline": "linear-gradient(to bottom, transparent 50%, rgba(0, 0, 0, 0.3) 50%)",
+      "card_hover": "linear-gradient(145deg, rgba(255,255,255,0.05) 0%, rgba(255,255,255,0.01) 100%)"
+    }
+  },
+  "layout_strategies": {
+    "dashboard": "Bento Grid (Grid Layout with varying spans)",
+    "workspace": "Mission Control (Sidebar + Main Stage + Floating Panels)",
+    "panels": "Split View (Resizable Panels using react-resizable-panels)",
+    "navigation": "Sidebar (Collapsible, Icon-only mode support)",
+    "modal": "Glass Overlay (Backdrop Blur XL, Centered)"
+  },
+  "components": {
+    "buttons": {
+      "primary": "bg-primary text-primary-foreground hover:bg-primary/90 shadow-[0_0_15px_rgba(0,217,255,0.3)] rounded-sm uppercase font-bold tracking-wider text-xs px-6 py-2 transition-all duration-300",
+      "secondary": "border border-primary/30 text-primary hover:bg-primary/10 rounded-sm uppercase font-bold tracking-wider text-xs px-6 py-2 backdrop-blur-sm",
+      "ghost": "hover:bg-accent/10 text-accent hover:text-white transition-colors"
+    },
+    "cards": {
+      "base": "bg-[#0d1b2a]/80 backdrop-blur-md border border-primary/20 rounded-lg shadow-lg hover:border-primary/40 transition-colors duration-300",
+      "glass": "bg-background/40 backdrop-blur-xl border border-white/10 shadow-xl",
+      "active": "border-primary/60 shadow-[0_0_15px_rgba(0,217,255,0.15)]"
+    },
+    "inputs": {
+      "base": "bg-[#0a1628] border border-primary/20 focus:border-primary/60 focus:ring-1 focus:ring-primary/60 text-white placeholder:text-muted-foreground rounded-md px-4 py-2 transition-all",
+      "search": "pl-10 bg-[#0d1b2a]/50 border-transparent focus:border-primary/40 rounded-full"
+    },
+    "graph_nodes": {
+      "base": "bg-[#112240] border-2 border-primary/30 rounded-full w-12 h-12 flex items-center justify-center shadow-[0_0_10px_rgba(0,217,255,0.2)]",
+      "selected": "border-primary shadow-[0_0_20px_rgba(0,217,255,0.6)] scale-110 transition-transform",
+      "danger": "border-destructive shadow-[0_0_15px_rgba(255,59,48,0.4)]"
+    }
+  },
+  "visual_enhancers": {
+    "glassmorphism": "backdrop-blur-md bg-opacity-70",
+    "neon_glow": "box-shadow: 0 0 10px theme('colors.primary.DEFAULT')",
+    "grid_background": "bg-[linear-gradient(to_right,#1e293b_1px,transparent_1px),linear-gradient(to_bottom,#1e293b_1px,transparent_1px)] bg-[size:4rem_4rem]",
+    "scanlines": "pointer-events-none fixed inset-0 z-50 bg-[linear-gradient(transparent_50%,rgba(0,0,0,0.2)_50%)] bg-[length:100%_4px]"
+  },
+  "icons": {
+    "library": "lucide-react",
+    "style": "stroke-1.5",
+    "usage": {
+      "sidebar": "w-5 h-5",
+      "actions": "w-4 h-4",
+      "graph": "w-6 h-6"
+    }
+  },
+  "libraries": {
+    "graph": "reactflow",
+    "charts": "recharts",
+    "icons": "lucide-react",
+    "animations": "framer-motion",
+    "maps": "react-simple-maps or leaflet (if needed)",
+    "ui": "shadcn/ui (customized)"
+  },
+  "assets": {
+    "images": [
+      {
+        "category": "background",
+        "url": "https://images.unsplash.com/photo-1739054730201-4b6463484e3c?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2NzZ8MHwxfHNlYXJjaHwxfHxhYnN0cmFjdCUyMGN5YmVyc2VjdXJpdHklMjB0ZWNobm9sb2d5JTIwZ3JpZCUyMGJhY2tncm91bmQlMjBkYXJrJTIwYmx1ZXxlbnwwfHx8fDE3NzI2Mjk1NjB8MA&ixlib=rb-4.1.0&q=85",
+        "description": "Abstract blue grid background for login/landing pages"
+      },
+      {
+        "category": "texture",
+        "url": "https://images.unsplash.com/photo-1767477665602-ab4e96be7701?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2NzZ8MHwxfHNlYXJjaHwyfHxhYnN0cmFjdCUyMGN5YmVyc2VjdXJpdHklMjB0ZWNobm9sb2d5JTIwZ3JpZCUyMGJhY2tncm91bmQlMjBkYXJrJTIwYmx1ZXxlbnwwfHx8fDE3NzI2Mjk1NjB8MA&ixlib=rb-4.1.0&q=85",
+        "description": "Digital noise texture for overlay effects"
+      }
+    ]
+  },
+  "instructions_to_main_agent": [
+    "1. **Theme Enforcement**: ALWAYS use the provided color palette. NO purple/pink gradients. Stick to Navy/Teal/Cyan.",
+    "2. **Graph Visualization**: The 'Investigation Workspace' MUST use React Flow. Custom nodes are mandatory (use the `graph_nodes` styles).",
+    "3. **Layout**: Use `react-resizable-panels` for the split view between Graph and Details Panel.",
+    "4. **AI Integration**: AI Suggestions should appear as 'Action Cards' in a sidebar or floating panel, not just plain text.",
+    "5. **Data Visualization**: Use Recharts for any timeline or statistical data. Style charts to match the dark theme (no white backgrounds).",
+    "6. **Interactivity**: All interactive elements MUST have hover states defined in `components.buttons` or `components.cards`.",
+    "7. **Testing**: Add `data-testid` to all major interactive elements (buttons, inputs, nodes)."
+  ],
+  "UNIVERSAL_GUIDELINES": [
+    "You tend to converge toward generic, 'on distribution' outputs. Avoid this.",
+    "Dark colors look good when used independently without gradients. DO NOT use dark colors as gradients.",
+    "Create depth through layered design elements with z-index hierarchy.",
+    "Use glass-morphism effects with backdrop filters (12-24px blur).",
+    "You MUST NOT apply universal transition. Eg: `transition: all`. This results in breaking transforms.",
+    "You MUST NOT center align the app container. This disrupts the human natural reading flow of text.",
+    "Always use modern button styles like pill-shaped, or sharp button with interaction animations.",
+    "Every interaction needs micro-animations - hover states, transitions, parallax effects.",
+    "Use 2-3x more spacing than feels comfortable. Cramped designs look cheap.",
+    "Add `data-testid` to all interactive elements."
+  ]
+}
