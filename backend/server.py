@@ -1,4 +1,5 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Header
+from fastapi import FastAPI, APIRouter, HTTPException, Header, UploadFile, File, Form
+from fastapi.responses import StreamingResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -11,6 +12,30 @@ import uuid
 from datetime import datetime, timezone
 from emergentintegrations.llm.chat import LlmChat, UserMessage
 import json
+import re
+import httpx
+import base64
+from io import BytesIO
+
+# Optional OCR/PDF imports
+try:
+    import pytesseract
+    from PIL import Image
+    OCR_AVAILABLE = True
+except ImportError:
+    OCR_AVAILABLE = False
+
+try:
+    from PyPDF2 import PdfReader
+    PDF_AVAILABLE = True
+except ImportError:
+    PDF_AVAILABLE = False
+
+try:
+    from bs4 import BeautifulSoup
+    BS4_AVAILABLE = True
+except ImportError:
+    BS4_AVAILABLE = False
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -191,6 +216,128 @@ class InvestigationLead(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     metadata: Dict[str, Any] = {}
 
+# ============= AI CHAT MODELS =============
+
+class ChatMessage(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    investigation_id: str
+    session_id: str
+    role: str  # user, assistant
+    content: str
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+class ChatRequest(BaseModel):
+    message: str
+    session_id: Optional[str] = None
+
+class URLIngestRequest(BaseModel):
+    url: str
+    evidence_type: str = "webpage"
+    notes: str = ""
+
+class RawTextIngestRequest(BaseModel):
+    content: str
+    title: str = ""
+    evidence_type: str = "raw_text"
+    notes: str = ""
+
+# ============= EXPANDED EVIDENCE CATEGORIES =============
+
+EVIDENCE_CATEGORIES = {
+    "web": {
+        "label": "Web Evidence",
+        "types": [
+            {"value": "webpage", "label": "Web Page", "icon": "globe"},
+            {"value": "screenshot", "label": "Website Screenshot", "icon": "image"},
+            {"value": "url", "label": "URL", "icon": "link"},
+            {"value": "forum_post", "label": "Forum Post", "icon": "message-square"},
+            {"value": "blog_article", "label": "Blog Article", "icon": "file-text"},
+            {"value": "paste_site", "label": "Paste Site Content", "icon": "clipboard"},
+        ]
+    },
+    "social": {
+        "label": "Social Media Evidence",
+        "types": [
+            {"value": "social_profile", "label": "Social Media Profile", "icon": "user"},
+            {"value": "social_post", "label": "Social Media Post", "icon": "message-circle"},
+            {"value": "social_comment", "label": "Social Media Comment", "icon": "message-square"},
+            {"value": "thread", "label": "Thread", "icon": "git-branch"},
+            {"value": "video_post", "label": "Video Post", "icon": "video"},
+        ]
+    },
+    "identity": {
+        "label": "Identity Evidence",
+        "types": [
+            {"value": "email_evidence", "label": "Email Address", "icon": "mail"},
+            {"value": "username_evidence", "label": "Username", "icon": "at-sign"},
+            {"value": "phone_evidence", "label": "Phone Number", "icon": "phone"},
+            {"value": "alias", "label": "Alias", "icon": "users"},
+            {"value": "real_name", "label": "Real Name", "icon": "user-check"},
+        ]
+    },
+    "crypto": {
+        "label": "Crypto / Financial Evidence",
+        "types": [
+            {"value": "crypto_wallet", "label": "Crypto Wallet", "icon": "wallet"},
+            {"value": "blockchain_tx", "label": "Blockchain Transaction", "icon": "activity"},
+            {"value": "exchange_account", "label": "Exchange Account", "icon": "database"},
+            {"value": "payment_screenshot", "label": "Payment Screenshot", "icon": "credit-card"},
+        ]
+    },
+    "infrastructure": {
+        "label": "Infrastructure Evidence",
+        "types": [
+            {"value": "domain_evidence", "label": "Domain", "icon": "globe"},
+            {"value": "subdomain", "label": "Subdomain", "icon": "git-merge"},
+            {"value": "ip_evidence", "label": "IP Address", "icon": "server"},
+            {"value": "server", "label": "Server", "icon": "hard-drive"},
+            {"value": "dns_record", "label": "DNS Record", "icon": "list"},
+            {"value": "whois_record", "label": "WHOIS Record", "icon": "file-text"},
+        ]
+    },
+    "files": {
+        "label": "Files and Media",
+        "types": [
+            {"value": "document", "label": "Document", "icon": "file-text"},
+            {"value": "screenshot", "label": "Screenshot", "icon": "image"},
+            {"value": "photo", "label": "Photo", "icon": "camera"},
+            {"value": "video", "label": "Video", "icon": "video"},
+            {"value": "audio", "label": "Audio", "icon": "volume-2"},
+            {"value": "pdf", "label": "PDF", "icon": "file"},
+            {"value": "spreadsheet", "label": "Spreadsheet", "icon": "table"},
+        ]
+    },
+    "communication": {
+        "label": "Communication Evidence",
+        "types": [
+            {"value": "email_message", "label": "Email Message", "icon": "mail"},
+            {"value": "chat_log", "label": "Chat Log", "icon": "message-square"},
+            {"value": "sms_message", "label": "SMS Message", "icon": "smartphone"},
+            {"value": "telegram_chat", "label": "Telegram Chat", "icon": "send"},
+            {"value": "discord_message", "label": "Discord Message", "icon": "hash"},
+        ]
+    },
+    "forensics": {
+        "label": "Technical Forensics",
+        "types": [
+            {"value": "metadata_dump", "label": "Metadata Dump", "icon": "code"},
+            {"value": "exif_data", "label": "EXIF Data", "icon": "info"},
+            {"value": "log_file", "label": "Log File", "icon": "file-code"},
+            {"value": "hash_value", "label": "Hash Value", "icon": "hash"},
+        ]
+    },
+    "notes": {
+        "label": "Investigator Notes",
+        "types": [
+            {"value": "analyst_note", "label": "Analyst Note", "icon": "edit"},
+            {"value": "observation", "label": "Observation", "icon": "eye"},
+            {"value": "hypothesis", "label": "Hypothesis", "icon": "help-circle"},
+            {"value": "lead_note", "label": "Lead", "icon": "lightbulb"},
+        ]
+    }
+}
+
 # ============= MOCK OSINT DATA =============
 MOCK_OSINT_DATA = {
     "email": [
@@ -220,42 +367,252 @@ MOCK_OSINT_DATA = {
 }
 
 # ============= ENTITY EXTRACTION PATTERNS =============
-import re
+# Enhanced patterns for comprehensive indicator detection
 
 ENTITY_PATTERNS = {
     "email": {
         "pattern": r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}',
-        "label": "Email Address"
+        "label": "Email Address",
+        "entity_type": "email",
+        "risk_base": 0.3
     },
     "domain": {
-        "pattern": r'(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+(?:onion|com|net|org|io|co|info|biz|gov|edu|mil|int|xyz|online|site|tech|dev|app|cloud)',
-        "label": "Domain"
+        "pattern": r'(?<![/@])(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+(?:onion|com|net|org|io|co|info|biz|gov|edu|mil|int|xyz|online|site|tech|dev|app|cloud|ru|cn|uk|de|fr|jp|br|in|au|nl|se|ch|es|it|pl|cz|ro|hu|bg|ua|kz|by)',
+        "label": "Domain",
+        "entity_type": "domain",
+        "risk_base": 0.4
     },
-    "ip": {
+    "onion_domain": {
+        "pattern": r'[a-z2-7]{16,56}\.onion',
+        "label": "Tor Hidden Service",
+        "entity_type": "domain",
+        "risk_base": 0.8
+    },
+    "ip_v4": {
         "pattern": r'\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b',
-        "label": "IP Address"
+        "label": "IPv4 Address",
+        "entity_type": "ip",
+        "risk_base": 0.3
+    },
+    "ip_v6": {
+        "pattern": r'(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|(?:[0-9a-fA-F]{1,4}:){1,7}:|(?:[0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}',
+        "label": "IPv6 Address",
+        "entity_type": "ip",
+        "risk_base": 0.3
     },
     "wallet_eth": {
         "pattern": r'0x[a-fA-F0-9]{40}',
-        "label": "Ethereum Wallet"
+        "label": "Ethereum Wallet",
+        "entity_type": "wallet",
+        "risk_base": 0.5
     },
     "wallet_btc": {
         "pattern": r'(?:bc1|[13])[a-zA-HJ-NP-Z0-9]{25,39}',
-        "label": "Bitcoin Wallet"
+        "label": "Bitcoin Wallet",
+        "entity_type": "wallet",
+        "risk_base": 0.5
     },
-    "phone": {
-        "pattern": r'(?:\+\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}',
-        "label": "Phone Number"
+    "wallet_monero": {
+        "pattern": r'4[0-9AB][1-9A-HJ-NP-Za-km-z]{93}',
+        "label": "Monero Wallet",
+        "entity_type": "wallet",
+        "risk_base": 0.7
     },
-    "username": {
+    "phone_intl": {
+        "pattern": r'\+[1-9]\d{1,14}',
+        "label": "International Phone",
+        "entity_type": "phone",
+        "risk_base": 0.2
+    },
+    "phone_us": {
+        "pattern": r'(?:\+1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}',
+        "label": "US Phone Number",
+        "entity_type": "phone",
+        "risk_base": 0.2
+    },
+    "username_twitter": {
+        "pattern": r'(?:twitter\.com/|@)([A-Za-z0-9_]{1,15})',
+        "label": "Twitter Handle",
+        "entity_type": "username",
+        "risk_base": 0.1
+    },
+    "username_telegram": {
+        "pattern": r'(?:t\.me/|@)([A-Za-z0-9_]{5,32})',
+        "label": "Telegram Handle",
+        "entity_type": "username",
+        "risk_base": 0.2
+    },
+    "username_generic": {
         "pattern": r'@[A-Za-z0-9_]{3,30}',
-        "label": "Username/Handle"
+        "label": "Username/Handle",
+        "entity_type": "username",
+        "risk_base": 0.1
     },
     "url": {
-        "pattern": r'https?://[^\s<>"{}|\\^`\[\]]+',
-        "label": "URL"
+        "pattern": r'https?://[^\s<>"\'{}|\\^`\[\]]+',
+        "label": "URL",
+        "entity_type": "url",
+        "risk_base": 0.2
+    },
+    "social_profile": {
+        "pattern": r'(?:facebook\.com|instagram\.com|linkedin\.com|github\.com|reddit\.com)/[A-Za-z0-9._-]+',
+        "label": "Social Profile URL",
+        "entity_type": "social",
+        "risk_base": 0.1
+    },
+    "hash_md5": {
+        "pattern": r'\b[a-fA-F0-9]{32}\b',
+        "label": "MD5 Hash",
+        "entity_type": "hash",
+        "risk_base": 0.3
+    },
+    "hash_sha256": {
+        "pattern": r'\b[a-fA-F0-9]{64}\b',
+        "label": "SHA256 Hash",
+        "entity_type": "hash",
+        "risk_base": 0.3
     }
 }
+
+# ============= CONTENT EXTRACTION FUNCTIONS =============
+
+async def fetch_url_content(url: str) -> Dict[str, Any]:
+    """Fetch and parse content from a URL"""
+    result = {
+        "success": False,
+        "content": "",
+        "title": "",
+        "metadata": {},
+        "error": None
+    }
+    
+    try:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            response = await client.get(url, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            })
+            response.raise_for_status()
+            
+            content_type = response.headers.get("content-type", "").lower()
+            
+            if "text/html" in content_type and BS4_AVAILABLE:
+                soup = BeautifulSoup(response.text, "lxml")
+                
+                # Remove script and style elements
+                for script in soup(["script", "style", "nav", "footer", "header"]):
+                    script.decompose()
+                
+                # Get title
+                title_tag = soup.find("title")
+                result["title"] = title_tag.get_text().strip() if title_tag else url
+                
+                # Get meta description
+                meta_desc = soup.find("meta", {"name": "description"})
+                if meta_desc:
+                    result["metadata"]["description"] = meta_desc.get("content", "")
+                
+                # Get main content text
+                result["content"] = soup.get_text(separator=" ", strip=True)[:50000]  # Limit size
+                result["success"] = True
+                
+            elif "application/json" in content_type:
+                result["content"] = response.text
+                result["title"] = "JSON Data"
+                result["success"] = True
+                
+            else:
+                result["content"] = response.text[:50000]
+                result["title"] = url
+                result["success"] = True
+                
+    except Exception as e:
+        result["error"] = str(e)
+        logger.error(f"Failed to fetch URL {url}: {e}")
+    
+    return result
+
+def extract_text_from_pdf(pdf_bytes: bytes) -> str:
+    """Extract text from a PDF file"""
+    if not PDF_AVAILABLE:
+        return ""
+    
+    try:
+        reader = PdfReader(BytesIO(pdf_bytes))
+        text_content = []
+        for page in reader.pages:
+            text = page.extract_text()
+            if text:
+                text_content.append(text)
+        return "\n".join(text_content)
+    except Exception as e:
+        logger.error(f"PDF extraction failed: {e}")
+        return ""
+
+def extract_text_from_image(image_bytes: bytes) -> str:
+    """Extract text from an image using OCR"""
+    if not OCR_AVAILABLE:
+        return ""
+    
+    try:
+        image = Image.open(BytesIO(image_bytes))
+        text = pytesseract.image_to_string(image)
+        return text.strip()
+    except Exception as e:
+        logger.error(f"OCR extraction failed: {e}")
+        return ""
+
+def extract_entities_from_text(text: str, source_evidence_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Extract all entities/indicators from text using regex patterns"""
+    extracted = []
+    seen_values = set()  # Deduplicate
+    
+    for pattern_name, config in ENTITY_PATTERNS.items():
+        try:
+            matches = re.findall(config["pattern"], text, re.IGNORECASE)
+            
+            for match in matches:
+                # Handle tuple matches from groups
+                if isinstance(match, tuple):
+                    match = match[0] if match else ""
+                
+                clean_value = match.strip()
+                if not clean_value or len(clean_value) < 3:
+                    continue
+                
+                # Skip common false positives
+                if clean_value.lower() in ["www", "http", "https", "ftp", "mail"]:
+                    continue
+                
+                # Deduplicate
+                dedup_key = f"{config['entity_type']}:{clean_value.lower()}"
+                if dedup_key in seen_values:
+                    continue
+                seen_values.add(dedup_key)
+                
+                # Calculate risk score
+                risk_score = config.get("risk_base", 0.3)
+                if ".onion" in clean_value.lower():
+                    risk_score = max(risk_score, 0.8)
+                if pattern_name.startswith("wallet_"):
+                    risk_score = max(risk_score, 0.5)
+                
+                extracted.append({
+                    "type": config["entity_type"],
+                    "pattern_match": pattern_name,
+                    "value": clean_value,
+                    "label": config["label"],
+                    "confidence": 0.85,
+                    "risk_score": risk_score,
+                    "source_evidence_id": source_evidence_id
+                })
+        except re.error as e:
+            logger.error(f"Regex error for pattern {pattern_name}: {e}")
+            continue
+    
+    # Sort by risk score (highest first)
+    extracted.sort(key=lambda x: x.get("risk_score", 0), reverse=True)
+    
+    return extracted
 
 # ============= MOCK ENRICHMENT DATA =============
 def generate_mock_enrichment(entity_type: str, entity_value: str) -> Dict[str, Any]:
@@ -1417,38 +1774,15 @@ async def generate_report(investigation_id: str, x_api_key: str = Header(None)):
 # ============= ENTITY EXTRACTION =============
 
 @api_router.post("/extract/entities")
-async def extract_entities_from_text(
+async def api_extract_entities(
     request: EntityExtractionRequest,
     x_api_key: Optional[str] = Header(None)
 ):
     """Extract potential entities from text content"""
     await validate_api_key(x_api_key)
     
-    extracted = []
-    text = request.text
-    
-    for entity_type, config in ENTITY_PATTERNS.items():
-        matches = re.findall(config["pattern"], text, re.IGNORECASE)
-        unique_matches = list(set(matches))
-        
-        for match in unique_matches:
-            # Clean up match
-            clean_value = match.strip()
-            if not clean_value:
-                continue
-                
-            # Determine entity type from pattern name
-            actual_type = entity_type
-            if entity_type.startswith("wallet_"):
-                actual_type = "wallet"
-            
-            extracted.append({
-                "type": actual_type,
-                "value": clean_value,
-                "label": config["label"],
-                "confidence": 0.85,  # Pattern match confidence
-                "source_evidence_id": request.source_evidence_id
-            })
+    # Use the helper function
+    extracted = extract_entities_from_text(request.text, request.source_evidence_id)
     
     return {
         "success": True,
@@ -1723,6 +2057,459 @@ async def delete_lead(
         raise HTTPException(status_code=404, detail="Lead not found")
     
     return {"success": True}
+
+# ============= AI CHAT ENDPOINTS =============
+
+@api_router.get("/investigations/{investigation_id}/chat/history")
+async def get_chat_history(
+    investigation_id: str,
+    session_id: Optional[str] = None,
+    limit: int = 50,
+    x_api_key: Optional[str] = Header(None)
+):
+    """Get chat history for an investigation"""
+    await validate_api_key(x_api_key)
+    
+    query = {"investigation_id": investigation_id}
+    if session_id:
+        query["session_id"] = session_id
+    
+    messages = await db.chat_messages.find(
+        query,
+        {"_id": 0}
+    ).sort("timestamp", 1).to_list(limit)
+    
+    return {
+        "messages": messages,
+        "count": len(messages)
+    }
+
+@api_router.post("/investigations/{investigation_id}/chat")
+async def chat_with_ai(
+    investigation_id: str,
+    request: ChatRequest,
+    x_api_key: Optional[str] = Header(None)
+):
+    """Interactive AI chat with investigation context"""
+    await validate_api_key(x_api_key)
+    
+    # Get or create session ID
+    session_id = request.session_id or f"chat-{investigation_id}-{uuid.uuid4().hex[:8]}"
+    
+    try:
+        # Fetch investigation context
+        investigation = await db.investigations.find_one(
+            {"id": investigation_id}, {"_id": 0}
+        )
+        if not investigation:
+            raise HTTPException(status_code=404, detail="Investigation not found")
+        
+        entities = await db.entities.find(
+            {"investigation_id": investigation_id}, {"_id": 0}
+        ).to_list(100)
+        
+        relationships = await db.relationships.find(
+            {"investigation_id": investigation_id}, {"_id": 0}
+        ).to_list(100)
+        
+        evidence = await db.evidence.find(
+            {"investigation_id": investigation_id}, {"_id": 0}
+        ).to_list(50)
+        
+        timeline = await db.timeline_events.find(
+            {"investigation_id": investigation_id}, {"_id": 0}
+        ).sort("timestamp", -1).to_list(20)
+        
+        leads = await db.investigation_leads.find(
+            {"investigation_id": investigation_id}, {"_id": 0}
+        ).to_list(20)
+        
+        # Get chat history for context
+        chat_history = await db.chat_messages.find(
+            {"investigation_id": investigation_id, "session_id": session_id},
+            {"_id": 0}
+        ).sort("timestamp", 1).to_list(20)
+        
+        # Build comprehensive context
+        context_parts = [
+            f"# Investigation: {investigation.get('name', 'Unknown')}",
+            f"Description: {investigation.get('description', 'N/A')}",
+            f"\n## Statistics:",
+            f"- Entities: {len(entities)}",
+            f"- Relationships: {len(relationships)}",
+            f"- Evidence Items: {len(evidence)}",
+            f"- Investigation Leads: {len(leads)}",
+        ]
+        
+        if entities:
+            context_parts.append("\n## Key Entities:")
+            entities_by_type = {}
+            for e in entities:
+                et = e.get('entity_type', 'unknown')
+                if et not in entities_by_type:
+                    entities_by_type[et] = []
+                entities_by_type[et].append(e.get('value', '')[:50])
+            
+            for etype, values in list(entities_by_type.items())[:8]:
+                context_parts.append(f"- {etype.upper()}: {', '.join(values[:5])}")
+        
+        if relationships:
+            context_parts.append(f"\n## Relationships: {len(relationships)} connections discovered")
+            for rel in relationships[:5]:
+                source = next((e for e in entities if e['id'] == rel.get('source_entity_id')), {})
+                target = next((e for e in entities if e['id'] == rel.get('target_entity_id')), {})
+                context_parts.append(f"- {source.get('value', '?')[:20]} → {rel.get('relationship_type', '?')} → {target.get('value', '?')[:20]}")
+        
+        if leads:
+            context_parts.append("\n## Active Leads:")
+            for lead in leads[:5]:
+                context_parts.append(f"- [{lead.get('severity', 'medium').upper()}] {lead.get('title', '?')}: {lead.get('description', '')[:100]}")
+        
+        if evidence:
+            context_parts.append(f"\n## Evidence Summary: {len(evidence)} items")
+            for ev in evidence[:5]:
+                context_parts.append(f"- [{ev.get('evidence_type', 'unknown')}] {ev.get('content', '')[:80]}...")
+        
+        investigation_context = "\n".join(context_parts)
+        
+        # Build system message
+        system_message = f"""You are an expert OSINT investigation analyst assistant. You have access to the current investigation data and can help analyze it.
+
+Your capabilities:
+1. Answer questions about entities, relationships, and evidence in this investigation
+2. Identify patterns, connections, and suspicious activities
+3. Suggest next investigative steps
+4. Summarize the investigation status
+5. Analyze potential connections between entities
+6. Assess risk levels and provide threat intelligence insights
+
+Always be professional, precise, and focus on actionable intelligence. When analyzing data, cite specific entities and relationships. If you identify potential leads or patterns, explain your reasoning.
+
+CURRENT INVESTIGATION DATA:
+{investigation_context}
+"""
+        
+        # Initialize chat
+        chat = LlmChat(
+            api_key=EMERGENT_LLM_KEY,
+            session_id=session_id,
+            system_message=system_message
+        ).with_model("gemini", "gemini-3-flash-preview")
+        
+        # Add previous messages to context
+        for msg in chat_history[-10:]:  # Last 10 messages for context
+            if msg.get('role') == 'user':
+                await chat.send_message(UserMessage(text=msg.get('content', '')))
+            # Note: Assistant messages are automatically tracked by LlmChat
+        
+        # Store user message
+        user_msg = ChatMessage(
+            investigation_id=investigation_id,
+            session_id=session_id,
+            role="user",
+            content=request.message
+        )
+        user_doc = serialize_datetime(user_msg.model_dump())
+        await db.chat_messages.insert_one(user_doc)
+        
+        # Send message and get response
+        response = await chat.send_message(UserMessage(text=request.message))
+        
+        # Store assistant message
+        assistant_msg = ChatMessage(
+            investigation_id=investigation_id,
+            session_id=session_id,
+            role="assistant",
+            content=response
+        )
+        assistant_doc = serialize_datetime(assistant_msg.model_dump())
+        await db.chat_messages.insert_one(assistant_doc)
+        
+        # Create timeline event
+        await create_timeline_event(
+            investigation_id,
+            "ai_chat",
+            f"AI chat interaction: {request.message[:50]}..."
+        )
+        
+        return {
+            "success": True,
+            "session_id": session_id,
+            "message": response,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"AI chat error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"AI chat failed: {str(e)}")
+
+@api_router.delete("/investigations/{investigation_id}/chat/clear")
+async def clear_chat_history(
+    investigation_id: str,
+    session_id: Optional[str] = None,
+    x_api_key: Optional[str] = Header(None)
+):
+    """Clear chat history for an investigation"""
+    await validate_api_key(x_api_key)
+    
+    query = {"investigation_id": investigation_id}
+    if session_id:
+        query["session_id"] = session_id
+    
+    result = await db.chat_messages.delete_many(query)
+    
+    return {
+        "success": True,
+        "deleted_count": result.deleted_count
+    }
+
+# ============= QUICK EVIDENCE INGEST ENDPOINTS =============
+
+@api_router.post("/investigations/{investigation_id}/ingest/url")
+async def ingest_url(
+    investigation_id: str,
+    request: URLIngestRequest,
+    x_api_key: Optional[str] = Header(None)
+):
+    """Quick ingest evidence from a URL with automatic content extraction and entity detection"""
+    await validate_api_key(x_api_key)
+    
+    # Fetch URL content
+    url_data = await fetch_url_content(request.url)
+    
+    if not url_data["success"]:
+        raise HTTPException(status_code=400, detail=f"Failed to fetch URL: {url_data.get('error', 'Unknown error')}")
+    
+    # Create evidence record
+    evidence = Evidence(
+        investigation_id=investigation_id,
+        evidence_type=request.evidence_type,
+        source_url=request.url,
+        content=url_data.get("content", "")[:10000],  # Limit stored content
+        notes=request.notes or f"Auto-ingested from URL: {url_data.get('title', request.url)}"
+    )
+    
+    doc = serialize_datetime(evidence.model_dump())
+    await db.evidence.insert_one(doc)
+    
+    # Extract entities from content
+    full_text = f"{url_data.get('title', '')} {url_data.get('content', '')} {request.url}"
+    detected_entities = extract_entities_from_text(full_text, evidence.id)
+    
+    # Create timeline event
+    await create_timeline_event(
+        investigation_id,
+        "evidence_ingested",
+        f"URL ingested: {url_data.get('title', request.url)[:50]}",
+        metadata={"evidence_id": evidence.id, "detected_entities": len(detected_entities)}
+    )
+    
+    return {
+        "success": True,
+        "evidence": {
+            "id": evidence.id,
+            "type": evidence.evidence_type,
+            "title": url_data.get("title", request.url),
+            "source_url": request.url,
+            "content_length": len(url_data.get("content", ""))
+        },
+        "detected_entities": detected_entities,
+        "extraction_stats": {
+            "total_found": len(detected_entities),
+            "by_type": {}
+        }
+    }
+
+@api_router.post("/investigations/{investigation_id}/ingest/text")
+async def ingest_raw_text(
+    investigation_id: str,
+    request: RawTextIngestRequest,
+    x_api_key: Optional[str] = Header(None)
+):
+    """Quick ingest raw text with automatic entity extraction"""
+    await validate_api_key(x_api_key)
+    
+    if not request.content.strip():
+        raise HTTPException(status_code=400, detail="Content cannot be empty")
+    
+    # Create evidence record
+    evidence = Evidence(
+        investigation_id=investigation_id,
+        evidence_type=request.evidence_type,
+        content=request.content[:50000],  # Limit size
+        notes=request.notes or f"Raw text: {request.title or 'Untitled'}"
+    )
+    
+    doc = serialize_datetime(evidence.model_dump())
+    await db.evidence.insert_one(doc)
+    
+    # Extract entities
+    detected_entities = extract_entities_from_text(request.content, evidence.id)
+    
+    # Group by type for stats
+    entities_by_type = {}
+    for entity in detected_entities:
+        etype = entity.get("type", "unknown")
+        if etype not in entities_by_type:
+            entities_by_type[etype] = 0
+        entities_by_type[etype] += 1
+    
+    # Create timeline event
+    await create_timeline_event(
+        investigation_id,
+        "evidence_ingested",
+        f"Raw text ingested: {request.title or 'Untitled'}",
+        metadata={"evidence_id": evidence.id, "detected_entities": len(detected_entities)}
+    )
+    
+    return {
+        "success": True,
+        "evidence": {
+            "id": evidence.id,
+            "type": evidence.evidence_type,
+            "title": request.title or "Raw Text",
+            "content_length": len(request.content)
+        },
+        "detected_entities": detected_entities,
+        "extraction_stats": {
+            "total_found": len(detected_entities),
+            "by_type": entities_by_type
+        }
+    }
+
+@api_router.post("/investigations/{investigation_id}/ingest/file")
+async def ingest_file(
+    investigation_id: str,
+    file: UploadFile = File(...),
+    evidence_type: str = Form("document"),
+    notes: str = Form(""),
+    x_api_key: Optional[str] = Header(None)
+):
+    """Upload and ingest a file with OCR/text extraction"""
+    await validate_api_key(x_api_key)
+    
+    # Read file content
+    file_content = await file.read()
+    file_size = len(file_content)
+    
+    if file_size > 10 * 1024 * 1024:  # 10MB limit
+        raise HTTPException(status_code=400, detail="File too large (max 10MB)")
+    
+    extracted_text = ""
+    content_type = file.content_type or ""
+    filename = file.filename or "uploaded_file"
+    
+    # Extract text based on file type
+    if "pdf" in content_type or filename.lower().endswith(".pdf"):
+        extracted_text = extract_text_from_pdf(file_content)
+        evidence_type = "pdf"
+    elif "image" in content_type or any(filename.lower().endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".gif", ".webp"]):
+        extracted_text = extract_text_from_image(file_content)
+        evidence_type = "screenshot"
+    elif "text" in content_type or any(filename.lower().endswith(ext) for ext in [".txt", ".log", ".csv"]):
+        try:
+            extracted_text = file_content.decode("utf-8")
+        except:
+            extracted_text = file_content.decode("latin-1", errors="ignore")
+    
+    # Create evidence record
+    evidence = Evidence(
+        investigation_id=investigation_id,
+        evidence_type=evidence_type,
+        content=extracted_text[:50000] if extracted_text else f"[Binary file: {filename}]",
+        notes=notes or f"Uploaded file: {filename}"
+    )
+    
+    doc = serialize_datetime(evidence.model_dump())
+    await db.evidence.insert_one(doc)
+    
+    # Extract entities if we have text
+    detected_entities = []
+    if extracted_text:
+        detected_entities = extract_entities_from_text(extracted_text, evidence.id)
+    
+    # Group by type
+    entities_by_type = {}
+    for entity in detected_entities:
+        etype = entity.get("type", "unknown")
+        if etype not in entities_by_type:
+            entities_by_type[etype] = 0
+        entities_by_type[etype] += 1
+    
+    # Create timeline event
+    await create_timeline_event(
+        investigation_id,
+        "file_uploaded",
+        f"File uploaded: {filename}",
+        metadata={
+            "evidence_id": evidence.id,
+            "filename": filename,
+            "file_size": file_size,
+            "detected_entities": len(detected_entities)
+        }
+    )
+    
+    return {
+        "success": True,
+        "evidence": {
+            "id": evidence.id,
+            "type": evidence_type,
+            "filename": filename,
+            "file_size": file_size,
+            "text_extracted": bool(extracted_text),
+            "content_length": len(extracted_text) if extracted_text else 0
+        },
+        "detected_entities": detected_entities,
+        "extraction_stats": {
+            "total_found": len(detected_entities),
+            "by_type": entities_by_type,
+            "ocr_available": OCR_AVAILABLE,
+            "pdf_available": PDF_AVAILABLE
+        }
+    }
+
+@api_router.post("/investigations/{investigation_id}/entities/batch")
+async def add_entities_batch(
+    investigation_id: str,
+    entities: List[EntityCreate],
+    x_api_key: Optional[str] = Header(None)
+):
+    """Add multiple entities at once (e.g., from detected indicators)"""
+    await validate_api_key(x_api_key)
+    
+    created_entities = []
+    
+    for entity_data in entities:
+        entity = Entity(
+            investigation_id=investigation_id,
+            **entity_data.model_dump()
+        )
+        
+        doc = serialize_datetime(entity.model_dump())
+        await db.entities.insert_one(doc)
+        created_entities.append(entity)
+    
+    # Create single timeline event for batch
+    await create_timeline_event(
+        investigation_id,
+        "entities_batch_added",
+        f"Batch added {len(created_entities)} entities",
+        metadata={"count": len(created_entities)}
+    )
+    
+    return {
+        "success": True,
+        "created_count": len(created_entities),
+        "entities": [serialize_datetime(e.model_dump()) for e in created_entities]
+    }
+
+# ============= EVIDENCE CATEGORIES ENDPOINT =============
+
+@api_router.get("/evidence/categories")
+async def get_evidence_categories(x_api_key: Optional[str] = Header(None)):
+    """Get all available evidence categories and types"""
+    await validate_api_key(x_api_key)
+    return EVIDENCE_CATEGORIES
 
 # Include the router in the main app
 app.include_router(api_router)

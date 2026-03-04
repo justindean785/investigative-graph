@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, FileBox, Users, Network, Clock, Sparkles, Search, Settings, Lightbulb } from 'lucide-react';
+import { ArrowLeft, FileBox, Users, Network, Clock, Sparkles, Search, Settings, Lightbulb, Brain } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
@@ -13,6 +13,7 @@ import GraphView from '../components/workspace/GraphView';
 import TimelineWorkspace from '../components/workspace/TimelineWorkspace';
 import AISuggestionsWorkspace from '../components/workspace/AISuggestionsWorkspace';
 import LeadsWorkspace from '../components/workspace/LeadsWorkspace';
+import AIChatWorkspace from '../components/workspace/AIChatWorkspace';
 
 const InvestigationWorkspace = () => {
   const { id } = useParams();
@@ -177,12 +178,20 @@ const InvestigationWorkspace = () => {
       description: 'Track investigation history'
     },
     { 
+      id: 'chat', 
+      label: 'AI Chat', 
+      icon: Brain,
+      count: null,
+      color: '#14f195',
+      description: 'Interactive AI analyst'
+    },
+    { 
       id: 'ai', 
-      label: 'AI', 
+      label: 'AI Gen', 
       icon: Sparkles,
       count: null,
       color: '#7c3aed',
-      description: 'AI-powered analysis'
+      description: 'AI-powered suggestions'
     },
   ];
 
@@ -326,6 +335,12 @@ const InvestigationWorkspace = () => {
           )}
           {activeTab === 'timeline' && (
             <TimelineWorkspace 
+              onNavigateToEvidence={() => navigateToTab('evidence')}
+            />
+          )}
+          {activeTab === 'chat' && (
+            <AIChatWorkspace 
+              investigationId={id}
               onNavigateToEvidence={() => navigateToTab('evidence')}
             />
           )}
