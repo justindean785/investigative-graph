@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, FileBox, Users, Network, Clock, Sparkles, Search, Settings } from 'lucide-react';
+import { ArrowLeft, FileBox, Users, Network, Clock, Sparkles, Search, Settings, Lightbulb } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
@@ -12,6 +12,7 @@ import EntitiesWorkspace from '../components/workspace/EntitiesWorkspace';
 import GraphView from '../components/workspace/GraphView';
 import TimelineWorkspace from '../components/workspace/TimelineWorkspace';
 import AISuggestionsWorkspace from '../components/workspace/AISuggestionsWorkspace';
+import LeadsWorkspace from '../components/workspace/LeadsWorkspace';
 
 const InvestigationWorkspace = () => {
   const { id } = useParams();
@@ -160,6 +161,14 @@ const InvestigationWorkspace = () => {
       description: 'Visualize connections'
     },
     { 
+      id: 'leads', 
+      label: 'Leads', 
+      icon: Lightbulb,
+      count: null,
+      color: '#f97316',
+      description: 'Auto-generated hypotheses'
+    },
+    { 
       id: 'timeline', 
       label: 'Timeline', 
       icon: Clock,
@@ -169,11 +178,11 @@ const InvestigationWorkspace = () => {
     },
     { 
       id: 'ai', 
-      label: 'AI Assistant', 
+      label: 'AI', 
       icon: Sparkles,
       count: null,
       color: '#7c3aed',
-      description: 'Get intelligent suggestions'
+      description: 'AI-powered analysis'
     },
   ];
 
@@ -303,6 +312,13 @@ const InvestigationWorkspace = () => {
           )}
           {activeTab === 'graph' && (
             <GraphView 
+              investigationId={id}
+              onNavigateToEvidence={() => navigateToTab('evidence')}
+              onNavigateToEntities={() => navigateToTab('entities')}
+            />
+          )}
+          {activeTab === 'leads' && (
+            <LeadsWorkspace 
               investigationId={id}
               onNavigateToEvidence={() => navigateToTab('evidence')}
               onNavigateToEntities={() => navigateToTab('entities')}
