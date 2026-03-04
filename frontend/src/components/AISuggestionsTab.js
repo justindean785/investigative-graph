@@ -1,10 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import axios from 'axios';
 import { Sparkles, Zap, RefreshCw, CheckCircle, XCircle, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { toast } from 'sonner';
-import { API } from '../App';
+import axios, { API } from '../config/api';
 
 const AISuggestionsTab = ({ investigationId, refreshTrigger, onRefresh }) => {
   const [suggestions, setSuggestions] = useState([]);

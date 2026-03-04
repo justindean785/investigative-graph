@@ -1,5 +1,4 @@
 import React, { useState, useEffect } from 'react';
-import axios from 'axios';
 import { useNavigate } from 'react-router-dom';
 import { Plus, Search, FolderOpen, Clock, Settings } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -7,9 +6,7 @@ import { Input } from '@/components/ui/input';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Label } from '@/components/ui/label';
 import { toast } from 'sonner';
-import { API, API_KEY } from '../App';
-
-axios.defaults.headers.common['x-api-key'] = API_KEY;
+import axios, { API } from '../config/api';
 
 const Dashboard = () => {
   const navigate = useNavigate();

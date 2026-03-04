@@ -5,9 +5,8 @@ import Dashboard from './pages/Dashboard';
 import InvestigationWorkspace from './pages/InvestigationWorkspace';
 import { Toaster } from './components/ui/sonner';
 
-export const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
-export const API = `${BACKEND_URL}/api`;
-export const API_KEY = 'trace-analyst-secret-2026';
+// Re-export from config for backwards compatibility
+export { API, API_KEY, BACKEND_URL } from './config/api';
 
 function App() {
   return (

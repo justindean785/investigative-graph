@@ -1,0 +1,159 @@
+<analysis>**original_problem_statement:**
+The user wants to build an **AI-powered OSINT investigation platform** that functions as a central workspace for managing investigations.
+
+**PRODUCT REQUIREMENTS:**
+- **Investigation Case Manager:** Create and manage cases, each with its own workspace.
+- **Entity System:** Add and manage entities (e.g., Person, Email, Domain) as nodes in a graph.
+- **Graph Relationship Map:** A visual graph (like Maltego) to map entities and their relationships.
+- **OSINT Enrichment Engine:** A built-in search tool for OSINT data. For the MVP, this will use mock/simulated data.
+- **AI Investigation Assistant:** An AI panel (using Gemini 3 Flash/Pro) that provides investigative suggestions as clickable action cards.
+- **Timeline System:** An event-sourced timeline tracking every action within an investigation (e.g., entity added, evidence linked).
+- **Evidence Vault:** A system for storing and linking evidence to entities and events.
+- **Network Discovery Engine:** Automatically detect and suggest links between entities.
+- **Clean Interface Layout:** A professional, dark, modern intelligence software aesthetic (dark navy/black, glassmorphism, with cyan/blue accents).
+- **Authentication:** Skipped for the MVP (single-user mode).
+- **Architecture:** Must follow a strict, user-provided specification:
+    1.  **Centralized State:** Use a single  (Zustand).
+    2.  **Event-Sourced Timeline:** Every action must append a timeline event.
+    3.  **Normalized Entity & Relationship Models:** Use strongly-typed schemas.
+    4.  **Graph Derivation:** The graph must be derived from the central store's entities and relationships.
+    5.  **Actionable AI Suggestions:** AI suggestions are objects with clickable actions that mutate the store.
+    6.  **Connector Layer:** An abstract layer for OSINT enrichment, mocked for now.
+    7.  **Specific Routing:**  and  for workspaces.
+    8.  **No Clutter UI:** Each tab should be a full, uncluttered workspace.
+
+**User's preferred language**: English
+
+**what currently exists?**
+The agent initially built a full-stack MVP. However, the user rejected the UI and provided a detailed architectural specification for a complete rewrite.
+
+The agent has now begun this rewrite:
+- **State Management:** Installed  and created a central  to act as the single source of truth, as per the user's spec.
+- **Styling:** Updated  and  to reflect the new professional, dark cyber intelligence theme (pure black backgrounds, blue/cyan accents).
+- **Components:** Started creating the new set of React components for the redesigned UI, including , , , , and .
+- **Backend:** The original FastAPI backend with MongoDB models and CRUD endpoints still exists but has not yet been updated to align with the new event-sourcing architecture.
+
+**Last working item**:
+- **Last item agent was working:** The agent was actively creating the new frontend components for the professional UI redesign, specifically  and , following the new architectural pattern.
+- **Status:** IN PROGRESS
+- **Agent Testing Done:** N
+- **Which testing method agent to use?** Frontend testing agent
+- **User Testing Done:** N
+
+**All Pending/In progress Issue list**:
+The project is in a complete rewrite phase. There are no specific bugs, but the entire application needs to be built according to the new specification.
+
+**In progress Task List**:
+- **Task 1: Complete UI/Architecture Rewrite (P0)**
+    - **Where to resume:** Continue building the React components. The immediate next steps are to finish implementing  and , ensuring they are fully connected to and driven by the  (Zustand).
+    - **What will be achieved with this?** This will complete the core UI structure of the investigation workspace, laying the foundation for implementing the other features.
+    - **Status:** IN PROGRESS
+    - **Should Test frontend/backend/both after fix?** Frontend
+
+**Upcoming and Future Tasks**
+**Upcoming Tasks:**
+- **Task 1: Implement Graph Interactivity (P0):**
+    - Make the graph in  fully interactive.
+    - Nodes and edges must be derived from the Zustand store (, ).
+    - Selecting a node should open a right-side **Entity Detail Drawer**.
+    - Creating an edge in the UI must trigger a store action that creates a  object and an  timeline event.
+- **Task 2: Implement Remaining Workspace Tabs (P1):**
+    - Create the , , and  components.
+    - **TimelineTab:** Must render events from the  array in the Zustand store.
+    - **EvidenceTab:** Must render items from the  array and allow linking to entities/edges.
+    - **AIPanel:** Must render AI suggestions as action cards with clickable buttons that mutate the store (e.g., Add Entity, Add Edge).
+- **Task 3: Refactor Backend for Event Sourcing (P1):**
+    - Modify the existing FastAPI endpoints in .
+    - Every endpoint that modifies data (create, update, delete) must also create and save a corresponding  to the database. This ensures the backend state is consistent with the event-sourced model required by the user.
+
+**Future Tasks:**
+- **Task 4: Implement Mock Enrichment Connector (P2):**
+    - Create the  directory and a mock connector that adheres to the specified interface: .
+- **Task 5: Implement Investigation Report Generator (P3):**
+    - Create a feature to export investigation data (summary, graph, timeline, evidence) into PDF/DOCX formats.
+
+**Completed work in this session**
+- An initial full-stack MVP was created and subsequently discarded based on user feedback.
+- **Architectural Rewrite Setup:**
+  - Installed  for state management.
+  - Created  as the central state store.
+  - Re-configured  and  for the new professional dark theme.
+  - Began creating new V2 components: , , , , , .
+
+**Earlier issues found/mentioned but not fixed**
+- The primary issue was that the initial MVP did not meet the user's aesthetic or architectural standards. This is being addressed by the ongoing rewrite.
+
+**Known issue recurrence from previous fork**
+- N/A
+
+**Code Architecture**
+
+
+**Key Technical Concepts**
+- **Backend:** FastAPI, Python, MongoDB
+- **Frontend:** React, JavaScript, Tailwind CSS
+- **State Management:** Zustand (Single Source of Truth)
+- **Graph Visualization:** React Flow
+
+**key DB schema**
+Defined in  as Pydantic models:
+- **Investigation:** 
+- **Entity:** 
+- **Relationship:** 
+- **TimelineEvent:** 
+- **Evidence:** 
+
+**changes in tech stack**
+-  was added for frontend state management.
+
+**All files of reference**
+- : Contains the backend logic and API endpoints. Needs refactoring.
+- : The new, critical central state store using Zustand.
+- : Updated with the new professional cyber intelligence theme.
+- : Updated with global styles for the new theme.
+- : The main container for the redesigned UI.
+- : The new component for the React Flow graph visualization.
+
+**Areas that need refactoring**:
+- **:** The entire backend API needs to be audited and refactored. The current CRUD endpoints must be updated to implement an event-sourcing pattern, where every state-changing action also generates and saves a  to the database.
+
+**key api endpoints**
+- : Create an investigation.
+- : Get investigation details.
+- : Add an entity.
+- : Get entities and relationships for the graph.
+- (And other CRUD endpoints for entities, relationships, etc., which need to be updated).
+
+**Critical Info for New Agent**
+- **Follow the Architecture Spec:** The user provided a detailed architecture specification in Chat Message 78. You **must** adhere to it strictly. The previous implementation was discarded for failing to meet these standards.
+- **Zustand is the Source of Truth:** All UI components must derive their state from the central . UI interactions should call store actions to mutate state.
+- **Event Sourcing is Mandatory:** Every action that changes the investigation's state (e.g., adding an entity, creating a relationship) must generate a  event that is added to the store and persisted in the backend.
+- **UI is Paramount:** The UI must match the professional, dark, Intrace-style aesthetic shown in the user's reference image. This means pure black/dark-gray backgrounds, sharp edges, glassmorphism, and a clean, uncluttered layout.
+
+**documents and test reports created in this job**
+-  (V1 and V2)
+
+**Last 10 User Messages and any pending HUMAN messages**
+- The user provided extremely detailed feedback, rejecting the initial UI.
+- They submitted a comprehensive **Architecture Spec** detailing requirements for state management (Zustand), an event-sourced timeline, data models, and component behavior.
+- They specified the UI must be a professional, dark, glassmorphism design, referencing the tool Intrace.
+- The agent acknowledged this and began a complete rewrite, starting with the Zustand store and new UI components. The user's last message shows the reference UI () which the agent is now building towards.
+
+**Project Health Check:**
+- **Broken:** The application is in the middle of a complete rewrite and is not in a runnable state.
+
+**3rd Party Integrations**
+- **Gemini 3 Flash/Pro:** Planned for the AI Investigation Assistant, but not yet integrated. Emergent LLM Key will likely be applicable.
+- **OSINT Data APIs:** Planned for the future but will be mocked for the MVP.
+
+**Testing status**
+- **Testing agent used after significant changes:** NO (The rewrite is in progress)
+- **Troubleshoot agent used after agent stuck in loop:** NO
+- **Test files created:** []
+- **Known regressions:** The entire initial application was a regression from the user's perspective and has been discarded.
+
+**Credentials to test flow:**
+N/A (Authentication is currently skipped as per user request).
+
+**What agent forgot to execute**
+The agent correctly pivoted to a full rewrite based on user feedback. It has not forgotten anything, but is now tasked with implementing the user's comprehensive architecture spec from the ground up. The main challenge will be ensuring every point in that spec is met.</analysis>

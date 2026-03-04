@@ -1,8 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import axios from 'axios';
 import { Clock, Circle } from 'lucide-react';
 import { toast } from 'sonner';
-import { API } from '../App';
+import axios, { API } from '../config/api';
 
 const TimelineTab = ({ investigationId, refreshTrigger }) => {
   const [events, setEvents] = useState([]);
