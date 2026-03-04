@@ -1,36 +1,116 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import axios from 'axios';
-import { ArrowLeft, Network, List, Clock, FileBox, Sparkles, Settings, Trash2 } from 'lucide-react';
+import { ArrowLeft, Network, MapPin, Clock, Table, Settings, Plus, Search, ZoomIn, ZoomOut, Maximize2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Input } from '@/components/ui/input';
 import { toast } from 'sonner';
-import { API } from '../App';
+import { API, API_KEY } from '../App';
+import useInvestigationStore from '../store/investigationStore';
+import GraphView from '../components/workspace/GraphView';
+import EntitiesPanel from '../components/workspace/EntitiesPanel';
 
-import EntitiesTab from '../components/EntitiesTab';
-import GraphTab from '../components/GraphTab';
-import TimelineTab from '../components/TimelineTab';
-import EvidenceTab from '../components/EvidenceTab';
-import AISuggestionsTab from '../components/AISuggestionsTab';
+axios.defaults.headers.common['x-api-key'] = API_KEY;
 
 const InvestigationWorkspace = () => {
   const { id } = useParams();
   const navigate = useNavigate();
-  const [investigation, setInvestigation] = useState(null);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState('graph');
-  const [refreshTrigger, setRefreshTrigger] = useState(0);
+  const [globalSearch, setGlobalSearch] = useState('');
+  
+  const {
+    investigation,
+    entities,
+    relationships,
+    timeline,
+    evidence,
+    setInvestigation,
+    setEntities,
+    setRelationships,
+    setTimeline,
+    setEvidence,
+  } = useInvestigationStore();
 
   useEffect(() => {
-    fetchInvestigation();
+    loadInvestigation();
   }, [id]);
 
-  const fetchInvestigation = async () => {
+  const loadInvestigation = async () => {
     try {
-      const response = await axios.get(`${API}/investigations/${id}`);
-      setInvestigation(response.data);
+      const [invRes, entRes, relRes, timeRes, evRes] = await Promise.all([
+        axios.get(`${API}/investigations/${id}`),
+        axios.get(`${API}/investigations/${id}/entities`),
+        axios.get(`${API}/investigations/${id}/relationships`),
+        axios.get(`${API}/investigations/${id}/timeline`),
+        axios.get(`${API}/investigations/${id}/evidence`),
+      ]);
+
+      setInvestigation(invRes.data);
+      
+      // Convert entities to store format
+      const mappedEntities = entRes.data.map(e => ({
+        id: e.id,
+        kind: e.entity_type,
+        value: e.value,
+        label: e.label || e.value,
+        notes: e.notes || '',
+        tags: [],
+        sources: e.sources || [],
+        confidence: e.confidence || 0.5,
+        risk: (e.risk_score || 0) * 100,
+        createdAt: e.created_at,
+        updatedAt: e.updated_at || e.created_at,
+      }));
+
+      // Convert relationships to store format
+      const mappedRelationships = relRes.data.map(r => ({
+        id: r.id,
+        fromId: r.source_entity_id,
+        toId: r.target_entity_id,
+        relType: r.relationship_type,
+        label: r.label || r.relationship_type,
+        confidence: r.confidence || 0.5,
+        sources: [],
+        createdAt: r.created_at,
+      }));
+
+      // Convert timeline to store format
+      const mappedTimeline = timeRes.data.map(t => ({
+        id: t.id,
+        ts: t.timestamp,
+        type: t.event_type,
+        summary: t.description,
+        refs: {
+          entityIds: t.entity_id ? [t.entity_id] : [],
+          evidenceIds: [],
+          edgeIds: [],
+        },
+        meta: t.metadata || {},
+      }));
+
+      // Convert evidence to store format
+      const mappedEvidence = evRes.data.map(e => ({
+        id: e.id,
+        type: e.evidence_type,
+        title: e.evidence_type,
+        sourceUrl: e.source_url || '',
+        content: e.content || '',
+        notes: e.notes || '',
+        hash: '',
+        linked: {
+          entityIds: e.entity_id ? [e.entity_id] : [],
+          edgeIds: [],
+        },
+        collectedAt: e.collected_at,
+      }));
+
+      setEntities(mappedEntities);
+      setRelationships(mappedRelationships);
+      setTimeline(mappedTimeline);
+      setEvidence(mappedEvidence);
     } catch (error) {
-      console.error('Failed to fetch investigation:', error);
+      console.error('Failed to load investigation:', error);
       toast.error('Failed to load investigation');
       navigate('/');
     } finally {
@@ -38,145 +118,158 @@ const InvestigationWorkspace = () => {
     }
   };
 
-  const triggerRefresh = () => {
-    setRefreshTrigger(prev => prev + 1);
-  };
-
-  const deleteInvestigation = async () => {
-    if (!window.confirm('Are you sure you want to delete this investigation? This action cannot be undone.')) {
-      return;
-    }
-
-    try {
-      await axios.delete(`${API}/investigations/${id}`);
-      toast.success('Investigation deleted successfully');
-      navigate('/');
-    } catch (error) {
-      console.error('Failed to delete investigation:', error);
-      toast.error('Failed to delete investigation');
-    }
-  };
-
   if (loading) {
     return (
-      <div className="min-h-screen bg-[#0a1628] flex items-center justify-center">
-        <div className="text-center">
-          <div className="inline-block h-12 w-12 animate-spin rounded-full border-4 border-solid border-[#00d9ff] border-r-transparent"></div>
-          <p className="mt-4 text-[#94a3b8]">Loading investigation...</p>
-        </div>
+      <div className="h-screen bg-[#050505] flex items-center justify-center">
+        <div className="loading-spinner w-12 h-12"></div>
       </div>
     );
   }
 
-  return (
-    <div className="min-h-screen bg-[#0a1628] flex flex-col">
-      {/* Header */}
-      <header className="border-b border-[#00d9ff]/20 glass">
-        <div className="px-6 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <Button
-              data-testid="back-to-dashboard-btn"
-              variant="ghost"
-              onClick={() => navigate('/')}
-              className="text-[#00d9ff] hover:text-white hover:bg-[#00d9ff]/10"
-            >
-              <ArrowLeft className="w-4 h-4 mr-2" />
-              Back
-            </Button>
-            <div>
-              <h1 className="text-2xl font-bold text-[#00d9ff]">{investigation?.name}</h1>
-              <p className="text-xs text-[#94a3b8] font-mono mt-1">{investigation?.case_id}</p>
-            </div>
-          </div>
+  const tabs = [
+    { id: 'graph', label: 'Graph', icon: Network },
+    { id: 'map', label: 'Map', icon: MapPin },
+    { id: 'timeline', label: 'Timeline', icon: Clock },
+    { id: 'table', label: 'Table', icon: Table },
+  ];
 
+  return (
+    <div className="h-screen flex flex-col bg-[#050505] overflow-hidden">
+      {/* Header */}
+      <header className="h-12 border-b border-white/5 flex items-center justify-between px-4 bg-black/50 backdrop-blur-sm flex-shrink-0 z-20">
+        <div className="flex items-center gap-4">
+          <Button
+            variant="ghost"
+            onClick={() => navigate('/')}
+            className="text-slate-400 hover:text-white h-8 px-2 gap-1 text-xs"
+          >
+            <ArrowLeft className="w-4 h-4" />
+            Return to Cases
+          </Button>
+          
+          <div className="h-4 w-px bg-white/5"></div>
+          
           <div className="flex items-center gap-2">
-            <Button
-              variant="ghost"
-              className="text-[#94a3b8] hover:text-white hover:bg-[#00d9ff]/10"
-            >
-              <Settings className="w-4 h-4" />
-            </Button>
-            <Button
-              data-testid="delete-investigation-btn"
-              variant="ghost"
-              onClick={deleteInvestigation}
-              className="text-[#ff3b30] hover:text-white hover:bg-[#ff3b30]/10"
-            >
-              <Trash2 className="w-4 h-4" />
-            </Button>
+            <div className="flex items-center gap-2 font-heading font-bold text-base">
+              <div className="w-6 h-6 bg-primary/20 border border-primary/50 rounded flex items-center justify-center text-primary text-sm">T</div>
+              <span className="text-white">TRACE ANALYST</span>
+            </div>
+            <span className="text-slate-500 text-sm">›</span>
+            <span className="text-white text-sm">{investigation?.name}</span>
           </div>
+        </div>
+        
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-slate-400 font-mono">{investigation?.case_id}</span>
         </div>
       </header>
 
-      {/* Main Workspace */}
-      <main className="flex-1 p-6">
-        <Tabs value={activeTab} onValueChange={setActiveTab} className="h-full flex flex-col">
-          <TabsList className="bg-[#0d1b2a]/80 border border-[#00d9ff]/20 p-1 mb-6 inline-flex w-fit">
-            <TabsTrigger
-              value="graph"
-              data-testid="graph-tab"
-              className="data-[state=active]:bg-[#00d9ff] data-[state=active]:text-black text-[#94a3b8] hover:text-white transition-colors px-6"
-            >
-              <Network className="w-4 h-4 mr-2" />
-              Graph
-            </TabsTrigger>
-            <TabsTrigger
-              value="entities"
-              data-testid="entities-tab"
-              className="data-[state=active]:bg-[#00d9ff] data-[state=active]:text-black text-[#94a3b8] hover:text-white transition-colors px-6"
-            >
-              <List className="w-4 h-4 mr-2" />
-              Entities
-            </TabsTrigger>
-            <TabsTrigger
-              value="timeline"
-              data-testid="timeline-tab"
-              className="data-[state=active]:bg-[#00d9ff] data-[state=active]:text-black text-[#94a3b8] hover:text-white transition-colors px-6"
-            >
-              <Clock className="w-4 h-4 mr-2" />
-              Timeline
-            </TabsTrigger>
-            <TabsTrigger
-              value="evidence"
-              data-testid="evidence-tab"
-              className="data-[state=active]:bg-[#00d9ff] data-[state=active]:text-black text-[#94a3b8] hover:text-white transition-colors px-6"
-            >
-              <FileBox className="w-4 h-4 mr-2" />
-              Evidence
-            </TabsTrigger>
-            <TabsTrigger
-              value="ai"
-              data-testid="ai-tab"
-              className="data-[state=active]:bg-[#00d9ff] data-[state=active]:text-black text-[#94a3b8] hover:text-white transition-colors px-6"
-            >
-              <Sparkles className="w-4 h-4 mr-2" />
-              AI Suggestions
-            </TabsTrigger>
-          </TabsList>
-
-          <div className="flex-1 overflow-hidden">
-            <TabsContent value="graph" className="h-full mt-0">
-              <GraphTab investigationId={id} refreshTrigger={refreshTrigger} onRefresh={triggerRefresh} />
-            </TabsContent>
-
-            <TabsContent value="entities" className="h-full mt-0">
-              <EntitiesTab investigationId={id} refreshTrigger={refreshTrigger} onRefresh={triggerRefresh} />
-            </TabsContent>
-
-            <TabsContent value="timeline" className="h-full mt-0">
-              <TimelineTab investigationId={id} refreshTrigger={refreshTrigger} />
-            </TabsContent>
-
-            <TabsContent value="evidence" className="h-full mt-0">
-              <EvidenceTab investigationId={id} refreshTrigger={refreshTrigger} onRefresh={triggerRefresh} />
-            </TabsContent>
-
-            <TabsContent value="ai" className="h-full mt-0">
-              <AISuggestionsTab investigationId={id} refreshTrigger={refreshTrigger} onRefresh={triggerRefresh} />
-            </TabsContent>
+      {/* Main Layout */}
+      <div className="flex flex-1 overflow-hidden relative">
+        {/* Left Sidebar */}
+        <aside className="w-64 border-r border-white/5 bg-black/50 flex flex-col z-10 flex-shrink-0">
+          <div className="p-3 border-b border-white/5">
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+              <Input
+                value={globalSearch}
+                onChange={(e) => setGlobalSearch(e.target.value)}
+                className="pl-9 bg-[#0a0a0a] border-white/10 h-9 text-sm"
+                placeholder="Global search..."
+              />
+            </div>
           </div>
-        </Tabs>
-      </main>
+
+          <div className="p-2 border-b border-white/5 flex justify-between items-center">
+            <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider">CASE NAVIGATOR</span>
+            <Button className="bg-primary/10 text-primary hover:bg-primary/20 px-2 py-1 h-6 rounded-sm text-xs">
+              <Plus className="w-3 h-3 mr-1" />
+              New
+            </Button>
+          </div>
+
+          <div className="flex-1 overflow-y-auto p-2">
+            <div className="space-y-1">
+              <div className="text-slate-400 hover:text-white px-3 py-2 hover:bg-white/5 rounded-sm cursor-pointer text-sm flex items-center gap-2">
+                <Network className="w-4 h-4" />
+                {investigation?.name}
+              </div>
+            </div>
+          </div>
+
+          <div className="p-3 border-t border-white/5">
+            <Button
+              variant="ghost"
+              className="w-full justify-center text-slate-400 hover:text-white text-xs h-9"
+            >
+              <Settings className="w-4 h-4 mr-2" />
+              Workspace Settings
+            </Button>
+          </div>
+        </aside>
+
+        {/* Main Content */}
+        <main className="flex-1 relative flex flex-col min-w-0 overflow-hidden">
+          {/* Tab Bar */}
+          <div className="h-12 border-b border-white/5 bg-black/50 backdrop-blur-sm z-10 flex items-center px-4 gap-6 flex-shrink-0">
+            {tabs.map(tab => (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={`flex items-center gap-2 h-full px-1 text-sm transition-colors ${
+                  activeTab === tab.id
+                    ? 'text-primary border-b-2 border-primary font-medium'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                <tab.icon className="w-4 h-4" />
+                {tab.label}
+              </button>
+            ))}
+            
+            <div className="flex-1"></div>
+            
+            {activeTab === 'graph' && (
+              <div className="flex items-center gap-1 bg-[#0a0a0a] rounded-sm border border-white/10 p-1">
+                <Button variant="ghost" size="sm" className="h-6 w-6 p-0 text-slate-400 hover:text-white">
+                  <Plus className="w-4 h-4" />
+                </Button>
+                <span className="text-xs text-slate-400 px-2 min-w-[3ch] text-center font-mono">100%</span>
+                <Button variant="ghost" size="sm" className="h-6 w-6 p-0 text-slate-400 hover:text-white">
+                  <ZoomOut className="w-4 h-4" />
+                </Button>
+                <div className="w-px h-4 bg-white/10 mx-1"></div>
+                <Button variant="ghost" size="sm" className="h-6 w-6 p-0 text-slate-400 hover:text-white">
+                  <Maximize2 className="w-4 h-4" />
+                </Button>
+              </div>
+            )}
+          </div>
+
+          {/* Content Area */}
+          <div className="flex-1 relative overflow-hidden bg-[#0a0a0a]">
+            {activeTab === 'graph' && <GraphView investigationId={id} />}
+            {activeTab === 'timeline' && (
+              <div className="h-full flex items-center justify-center">
+                <p className="text-slate-500">Timeline view coming soon</p>
+              </div>
+            )}
+            {activeTab === 'map' && (
+              <div className="h-full flex items-center justify-center">
+                <p className="text-slate-500">Map view coming soon</p>
+              </div>
+            )}
+            {activeTab === 'table' && (
+              <div className="h-full flex items-center justify-center">
+                <p className="text-slate-500">Table view coming soon</p>
+              </div>
+            )}
+          </div>
+        </main>
+
+        {/* Right Sidebar - Entities Panel */}
+        <EntitiesPanel investigationId={id} />
+      </div>
     </div>
   );
 };

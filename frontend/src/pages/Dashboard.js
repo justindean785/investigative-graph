@@ -1,14 +1,15 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { useNavigate } from 'react-router-dom';
-import { Plus, FolderOpen, Clock, Tag, Search, TrendingUp } from 'lucide-react';
+import { Plus, Search, FolderOpen, Clock, Settings } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Badge } from '@/components/ui/badge';
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Label } from '@/components/ui/label';
 import { toast } from 'sonner';
-import { API } from '../App';
+import { API, API_KEY } from '../App';
+
+axios.defaults.headers.common['x-api-key'] = API_KEY;
 
 const Dashboard = () => {
   const navigate = useNavigate();
@@ -21,7 +22,6 @@ const Dashboard = () => {
     description: '',
     tags: []
   });
-  const [tagInput, setTagInput] = useState('');
 
   useEffect(() => {
     fetchInvestigations();
@@ -47,10 +47,9 @@ const Dashboard = () => {
 
     try {
       const response = await axios.post(`${API}/investigations`, newInvestigation);
-      toast.success('Investigation created successfully');
+      toast.success('Investigation created');
       setShowCreateDialog(false);
       setNewInvestigation({ name: '', description: '', tags: [] });
-      setTagInput('');
       navigate(`/investigation/${response.data.id}`);
     } catch (error) {
       console.error('Failed to create investigation:', error);
@@ -58,27 +57,9 @@ const Dashboard = () => {
     }
   };
 
-  const addTag = () => {
-    if (tagInput.trim() && !newInvestigation.tags.includes(tagInput.trim())) {
-      setNewInvestigation({
-        ...newInvestigation,
-        tags: [...newInvestigation.tags, tagInput.trim()]
-      });
-      setTagInput('');
-    }
-  };
-
-  const removeTag = (tag) => {
-    setNewInvestigation({
-      ...newInvestigation,
-      tags: newInvestigation.tags.filter(t => t !== tag)
-    });
-  };
-
   const filteredInvestigations = investigations.filter(inv =>
     inv.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    inv.description.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    inv.tags.some(tag => tag.toLowerCase().includes(searchQuery.toLowerCase()))
+    inv.description.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
   const formatDate = (dateString) => {
@@ -87,220 +68,179 @@ const Dashboard = () => {
   };
 
   return (
-    <div className="min-h-screen bg-[#0a1628] grid-background">
+    <div className="h-screen flex flex-col bg-[#050505]">
       {/* Header */}
-      <header className="border-b border-[#00d9ff]/20 glass">
-        <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
-          <div>
-            <h1 className="text-3xl font-bold text-[#00d9ff] tracking-tight">TRACE ANALYST</h1>
-            <p className="text-sm text-[#94a3b8] mt-1 uppercase tracking-widest">OSINT Investigation Platform</p>
+      <header className="h-12 border-b border-white/5 flex items-center justify-between px-4 bg-black/50 backdrop-blur-sm flex-shrink-0">
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2 font-heading font-bold text-base">
+            <div className="w-6 h-6 bg-primary/20 border border-primary/50 rounded flex items-center justify-center text-primary text-sm">T</div>
+            <span className="text-white">TRACE ANALYST</span>
           </div>
-          
-          <Dialog open={showCreateDialog} onOpenChange={setShowCreateDialog}>
-            <DialogTrigger asChild>
-              <Button 
-                data-testid="create-investigation-btn"
-                className="bg-[#00d9ff] text-black hover:bg-[#00b8d9] shadow-[0_0_15px_rgba(0,217,255,0.3)] rounded-sm uppercase font-bold tracking-wider text-xs px-6 py-2 transition-all duration-300"
-              >
-                <Plus className="w-4 h-4 mr-2" />
-                New Investigation
-              </Button>
-            </DialogTrigger>
-            <DialogContent className="glass-xl border-[#00d9ff]/20 text-white">
-              <DialogHeader>
-                <DialogTitle className="text-2xl text-[#00d9ff]">Create Investigation</DialogTitle>
-              </DialogHeader>
-              <div className="space-y-4 mt-4">
-                <div>
-                  <Label htmlFor="name" className="text-sm text-[#94a3b8] uppercase tracking-wider">Case Name</Label>
-                  <Input
-                    id="name"
-                    data-testid="investigation-name-input"
-                    value={newInvestigation.name}
-                    onChange={(e) => setNewInvestigation({ ...newInvestigation, name: e.target.value })}
-                    className="mt-2 bg-[#0a1628] border-[#00d9ff]/20 focus:border-[#00d9ff]/60 focus:ring-1 focus:ring-[#00d9ff]/60 text-white"
-                    placeholder="Enter investigation name"
-                  />
-                </div>
-                <div>
-                  <Label htmlFor="description" className="text-sm text-[#94a3b8] uppercase tracking-wider">Description</Label>
-                  <textarea
-                    id="description"
-                    data-testid="investigation-description-input"
-                    value={newInvestigation.description}
-                    onChange={(e) => setNewInvestigation({ ...newInvestigation, description: e.target.value })}
-                    className="mt-2 w-full bg-[#0a1628] border border-[#00d9ff]/20 focus:border-[#00d9ff]/60 focus:ring-1 focus:ring-[#00d9ff]/60 text-white rounded-md px-4 py-2 min-h-[80px]"
-                    placeholder="Brief description of the investigation"
-                  />
-                </div>
-                <div>
-                  <Label className="text-sm text-[#94a3b8] uppercase tracking-wider">Tags</Label>
-                  <div className="flex gap-2 mt-2">
-                    <Input
-                      value={tagInput}
-                      onChange={(e) => setTagInput(e.target.value)}
-                      onKeyPress={(e) => e.key === 'Enter' && addTag()}
-                      className="bg-[#0a1628] border-[#00d9ff]/20 focus:border-[#00d9ff]/60 text-white"
-                      placeholder="Add tag and press Enter"
-                    />
-                  </div>
-                  <div className="flex flex-wrap gap-2 mt-2">
-                    {newInvestigation.tags.map(tag => (
-                      <Badge
-                        key={tag}
-                        className="bg-[#00d9ff]/20 text-[#00d9ff] border border-[#00d9ff]/30 cursor-pointer"
-                        onClick={() => removeTag(tag)}
-                      >
-                        {tag} ×
-                      </Badge>
-                    ))}
-                  </div>
-                </div>
-                <Button
-                  data-testid="create-investigation-submit"
-                  onClick={createInvestigation}
-                  className="w-full bg-[#00d9ff] text-black hover:bg-[#00b8d9] font-bold uppercase tracking-wider"
-                >
-                  Create Investigation
-                </Button>
-              </div>
-            </DialogContent>
-          </Dialog>
         </div>
+        <Button
+          onClick={() => setShowCreateDialog(true)}
+          className="bg-primary hover:bg-primary/90 text-white text-xs font-medium px-4 h-8 rounded-sm shadow-glow"
+        >
+          <Plus className="w-4 h-4 mr-1" />
+          New Investigation
+        </Button>
       </header>
 
-      {/* Main Content */}
-      <main className="max-w-7xl mx-auto px-6 py-8">
-        {/* Search Bar */}
-        <div className="mb-8">
-          <div className="relative">
-            <Search className="absolute left-4 top-1/2 transform -translate-y-1/2 w-5 h-5 text-[#94a3b8]" />
-            <Input
-              data-testid="search-investigations-input"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-12 bg-[#0d1b2a]/50 border-transparent focus:border-[#00d9ff]/40 rounded-full h-12 text-white"
-              placeholder="Search investigations by name, description, or tags..."
-            />
+      {/* Main */}
+      <div className="flex-1 overflow-hidden flex">
+        {/* Sidebar */}
+        <aside className="w-64 border-r border-white/5 bg-black/50 flex flex-col flex-shrink-0">
+          <div className="p-3 border-b border-white/5">
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+              <Input
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="pl-9 bg-[#0a0a0a] border-white/10 h-9 text-sm"
+                placeholder="Search investigations..."
+              />
+            </div>
           </div>
-        </div>
 
-        {/* Statistics Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-          <div className="glass border border-[#00d9ff]/20 rounded-lg p-6 hover:border-[#00d9ff]/40 transition-colors duration-300">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm text-[#94a3b8] uppercase tracking-widest">Total Cases</p>
-                <p className="text-3xl font-bold text-white mt-2">{investigations.length}</p>
-              </div>
-              <FolderOpen className="w-10 h-10 text-[#00d9ff] opacity-50" />
-            </div>
-          </div>
-          
-          <div className="glass border border-[#00d9ff]/20 rounded-lg p-6 hover:border-[#00d9ff]/40 transition-colors duration-300">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm text-[#94a3b8] uppercase tracking-widest">Active</p>
-                <p className="text-3xl font-bold text-white mt-2">
-                  {investigations.filter(i => i.status === 'active').length}
-                </p>
-              </div>
-              <TrendingUp className="w-10 h-10 text-[#14f195] opacity-50" />
-            </div>
-          </div>
-          
-          <div className="glass border border-[#00d9ff]/20 rounded-lg p-6 hover:border-[#00d9ff]/40 transition-colors duration-300">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm text-[#94a3b8] uppercase tracking-widest">Archived</p>
-                <p className="text-3xl font-bold text-white mt-2">
-                  {investigations.filter(i => i.status === 'archived').length}
-                </p>
-              </div>
-              <Clock className="w-10 h-10 text-[#94a3b8] opacity-50" />
-            </div>
-          </div>
-        </div>
-
-        {/* Investigations Grid */}
-        {loading ? (
-          <div className="flex items-center justify-center py-20">
-            <div className="inline-block h-12 w-12 animate-spin rounded-full border-4 border-solid border-[#00d9ff] border-r-transparent"></div>
-          </div>
-        ) : filteredInvestigations.length === 0 ? (
-          <div className="glass border border-[#00d9ff]/20 rounded-lg p-12 text-center">
-            <FolderOpen className="w-16 h-16 text-[#94a3b8] mx-auto mb-4 opacity-50" />
-            <h3 className="text-xl font-bold text-white mb-2">No Investigations Found</h3>
-            <p className="text-[#94a3b8] mb-6">Create your first investigation to start tracking entities and relationships</p>
+          <div className="p-3 border-b border-white/5">
+            <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3">CASE NAVIGATOR</div>
             <Button
               onClick={() => setShowCreateDialog(true)}
-              className="bg-[#00d9ff] text-black hover:bg-[#00b8d9] font-bold uppercase tracking-wider"
+              className="w-full bg-primary/10 text-primary hover:bg-primary/20 text-xs h-8 rounded-sm"
             >
-              <Plus className="w-4 h-4 mr-2" />
-              Create Investigation
+              <Plus className="w-3 h-3 mr-1" />
+              New Case
             </Button>
           </div>
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-            {filteredInvestigations.map(investigation => (
+
+          <div className="flex-1 overflow-y-auto p-2">
+            {filteredInvestigations.map(inv => (
               <div
-                key={investigation.id}
-                data-testid={`investigation-card-${investigation.id}`}
-                onClick={() => navigate(`/investigation/${investigation.id}`)}
-                className="glass border border-[#00d9ff]/20 rounded-lg p-6 hover:border-[#00d9ff]/60 hover:shadow-[0_0_15px_rgba(0,217,255,0.15)] transition-all duration-300 cursor-pointer group"
+                key={inv.id}
+                onClick={() => navigate(`/investigation/${inv.id}`)}
+                className="flex items-center gap-2 px-3 py-2 hover:bg-white/5 rounded-sm cursor-pointer text-slate-400 hover:text-white transition-colors group"
               >
-                <div className="flex items-start justify-between mb-4">
-                  <div className="flex-1">
-                    <h3 className="text-lg font-bold text-white group-hover:text-[#00d9ff] transition-colors">
-                      {investigation.name}
-                    </h3>
-                    <p className="text-xs text-[#94a3b8] font-mono mt-1">{investigation.case_id}</p>
-                  </div>
-                  <Badge
-                    className={`${
-                      investigation.status === 'active'
-                        ? 'bg-[#14f195]/20 text-[#14f195] border border-[#14f195]/30'
-                        : 'bg-[#94a3b8]/20 text-[#94a3b8] border border-[#94a3b8]/30'
-                    }`}
-                  >
-                    {investigation.status}
-                  </Badge>
-                </div>
-                
-                {investigation.description && (
-                  <p className="text-sm text-[#94a3b8] mb-4 line-clamp-2">{investigation.description}</p>
-                )}
-                
-                {investigation.tags && investigation.tags.length > 0 && (
-                  <div className="flex flex-wrap gap-2 mb-4">
-                    {investigation.tags.slice(0, 3).map(tag => (
-                      <Badge
-                        key={tag}
-                        className="bg-[#00d9ff]/10 text-[#00d9ff] border border-[#00d9ff]/20 text-xs"
-                      >
-                        <Tag className="w-3 h-3 mr-1" />
-                        {tag}
-                      </Badge>
-                    ))}
-                    {investigation.tags.length > 3 && (
-                      <Badge className="bg-[#94a3b8]/10 text-[#94a3b8] text-xs">
-                        +{investigation.tags.length - 3}
-                      </Badge>
-                    )}
-                  </div>
-                )}
-                
-                <div className="flex items-center justify-between pt-4 border-t border-[#00d9ff]/10">
-                  <div className="flex items-center text-xs text-[#94a3b8]">
-                    <Clock className="w-3 h-3 mr-1" />
-                    {formatDate(investigation.created_at)}
-                  </div>
-                </div>
+                <FolderOpen className="w-4 h-4" />
+                <span className="text-sm truncate flex-1">{inv.name}</span>
               </div>
             ))}
           </div>
-        )}
-      </main>
+
+          <div className="p-3 border-t border-white/5">
+            <Button
+              variant="ghost"
+              className="w-full justify-center text-slate-400 hover:text-white text-xs h-9"
+            >
+              <Settings className="w-4 h-4 mr-2" />
+              Settings
+            </Button>
+          </div>
+        </aside>
+
+        {/* Main Content */}
+        <main className="flex-1 overflow-y-auto p-8">
+          {loading ? (
+            <div className="flex items-center justify-center h-full">
+              <div className="loading-spinner w-12 h-12"></div>
+            </div>
+          ) : filteredInvestigations.length === 0 ? (
+            <div className="flex flex-col items-center justify-center h-full">
+              <div className="glass rounded-sm p-12 max-w-md text-center">
+                <FolderOpen className="w-16 h-16 text-slate-600 mx-auto mb-4" />
+                <h2 className="text-xl font-heading font-bold text-white mb-2">No Investigations</h2>
+                <p className="text-sm text-slate-400 mb-6">Create your first investigation to start tracking entities and relationships</p>
+                <Button
+                  onClick={() => setShowCreateDialog(true)}
+                  className="bg-primary hover:bg-primary/90 text-white rounded-sm shadow-glow"
+                >
+                  <Plus className="w-4 h-4 mr-2" />
+                  Create Investigation
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-6">
+              <div>
+                <h1 className="text-3xl font-heading font-bold text-white mb-2">Investigations</h1>
+                <p className="text-sm text-slate-400">Manage and track your intelligence cases</p>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {filteredInvestigations.map(inv => (
+                  <div
+                    key={inv.id}
+                    onClick={() => navigate(`/investigation/${inv.id}`)}
+                    className="glass rounded-sm p-5 hover:border-primary/30 cursor-pointer transition-all group"
+                  >
+                    <div className="flex items-start justify-between mb-3">
+                      <div className="flex-1">
+                        <h3 className="text-base font-heading font-semibold text-white group-hover:text-primary transition-colors mb-1">
+                          {inv.name}
+                        </h3>
+                        <p className="text-xs font-mono text-slate-500">{inv.case_id}</p>
+                      </div>
+                      <div className={`text-xs px-2 py-1 rounded-sm ${
+                        inv.status === 'active' 
+                          ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' 
+                          : 'bg-slate-500/10 text-slate-400 border border-slate-500/20'
+                      }`}>
+                        {inv.status}
+                      </div>
+                    </div>
+
+                    {inv.description && (
+                      <p className="text-sm text-slate-400 mb-4 line-clamp-2">{inv.description}</p>
+                    )}
+
+                    <div className="flex items-center justify-between pt-3 border-t border-white/5">
+                      <div className="flex items-center gap-1 text-xs text-slate-500">
+                        <Clock className="w-3 h-3" />
+                        {formatDate(inv.created_at)}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </main>
+      </div>
+
+      {/* Create Dialog */}
+      <Dialog open={showCreateDialog} onOpenChange={setShowCreateDialog}>
+        <DialogContent className="glass-strong border-white/10 text-white max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-xl font-heading">Create Investigation</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 mt-4">
+            <div>
+              <Label className="text-xs font-semibold text-cyan-500/80 uppercase tracking-wider mb-2 block">Case Name</Label>
+              <Input
+                value={newInvestigation.name}
+                onChange={(e) => setNewInvestigation({ ...newInvestigation, name: e.target.value })}
+                className="bg-black/50 border-white/10 focus:border-primary/50 text-white"
+                placeholder="Enter investigation name"
+                onKeyPress={(e) => e.key === 'Enter' && createInvestigation()}
+              />
+            </div>
+            <div>
+              <Label className="text-xs font-semibold text-cyan-500/80 uppercase tracking-wider mb-2 block">Description</Label>
+              <textarea
+                value={newInvestigation.description}
+                onChange={(e) => setNewInvestigation({ ...newInvestigation, description: e.target.value })}
+                className="w-full bg-black/50 border border-white/10 focus:border-primary/50 focus:ring-1 focus:ring-primary/20 rounded-sm px-3 py-2 text-sm text-white min-h-[80px]"
+                placeholder="Brief description"
+              />
+            </div>
+            <Button
+              onClick={createInvestigation}
+              className="w-full bg-primary hover:bg-primary/90 text-white rounded-sm shadow-glow h-10 font-medium"
+            >
+              Create Investigation
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 };
