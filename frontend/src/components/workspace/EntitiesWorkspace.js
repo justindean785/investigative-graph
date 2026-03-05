@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Users, Plus, Link2, Trash2, ChevronRight, Search, ArrowRight, Network } from 'lucide-react';
+import { Users, Plus, Link2, Trash2, ChevronRight, Search, ArrowRight, Network, User, Mail, Phone, Globe, Server, AtSign, Building2, Wallet, MessageSquare } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
@@ -11,16 +11,16 @@ import axios, { API } from '../../config/api';
 import useInvestigationStore from '../../store/investigationStore';
 
 const ENTITY_TYPES = [
-  { value: 'person', label: 'Person', icon: '👤', color: '#06b6d4' },
-  { value: 'email', label: 'Email', icon: '📧', color: '#14f195' },
-  { value: 'phone', label: 'Phone', icon: '📱', color: '#f97316' },
-  { value: 'domain', label: 'Domain', icon: '🌐', color: '#06b6d4' },
-  { value: 'ip', label: 'IP Address', icon: '🖥️', color: '#7c3aed' },
-  { value: 'username', label: 'Username', icon: '👨‍💻', color: '#14f195' },
-  { value: 'company', label: 'Company', icon: '🏢', color: '#f97316' },
-  { value: 'wallet', label: 'Wallet', icon: '💰', color: '#fbbf24' },
-  { value: 'social', label: 'Social Account', icon: '💬', color: '#3b82f6' },
-  { value: 'url', label: 'URL', icon: '🔗', color: '#06b6d4' },
+  { value: 'person', label: 'Person', icon: User, color: '#06b6d4' },
+  { value: 'email', label: 'Email', icon: Mail, color: '#14f195' },
+  { value: 'phone', label: 'Phone', icon: Phone, color: '#f97316' },
+  { value: 'domain', label: 'Domain', icon: Globe, color: '#06b6d4' },
+  { value: 'ip', label: 'IP Address', icon: Server, color: '#7c3aed' },
+  { value: 'username', label: 'Username', icon: AtSign, color: '#14f195' },
+  { value: 'company', label: 'Company', icon: Building2, color: '#f97316' },
+  { value: 'wallet', label: 'Wallet', icon: Wallet, color: '#fbbf24' },
+  { value: 'social', label: 'Social Account', icon: MessageSquare, color: '#3b82f6' },
+  { value: 'url', label: 'URL', icon: Link2, color: '#06b6d4' },
 ];
 
 const RELATIONSHIP_TYPES = [
@@ -269,9 +269,13 @@ const EntitiesWorkspace = ({ investigationId, onNavigateToGraph, onNavigateToEvi
                     <SelectContent className="bg-[#0a0a0a] border-white/10 text-white">
                       {entities.map(entity => {
                         const typeInfo = getTypeInfo(entity.kind);
+                        const TypeIcon = typeInfo.icon;
                         return (
                           <SelectItem key={entity.id} value={entity.id}>
-                            {typeInfo.icon} {entity.label || entity.value}
+                            <span className="flex items-center gap-2">
+                              {TypeIcon && <TypeIcon className="w-3.5 h-3.5" style={{ color: typeInfo.color }} />}
+                              {entity.label || entity.value}
+                            </span>
                           </SelectItem>
                         );
                       })}
@@ -320,9 +324,13 @@ const EntitiesWorkspace = ({ investigationId, onNavigateToGraph, onNavigateToEvi
                     <SelectContent className="bg-[#0a0a0a] border-white/10 text-white">
                       {entities.map(entity => {
                         const typeInfo = getTypeInfo(entity.kind);
+                        const TypeIcon = typeInfo.icon;
                         return (
                           <SelectItem key={entity.id} value={entity.id}>
-                            {typeInfo.icon} {entity.label || entity.value}
+                            <span className="flex items-center gap-2">
+                              {TypeIcon && <TypeIcon className="w-3.5 h-3.5" style={{ color: typeInfo.color }} />}
+                              {entity.label || entity.value}
+                            </span>
                           </SelectItem>
                         );
                       })}
@@ -398,10 +406,10 @@ const EntitiesWorkspace = ({ investigationId, onNavigateToGraph, onNavigateToEvi
                 <div className="p-4">
                   <div className="flex items-start gap-3">
                     <div 
-                      className="w-10 h-10 rounded-full flex items-center justify-center text-xl flex-shrink-0"
+                      className="w-10 h-10 rounded-sm flex items-center justify-center flex-shrink-0"
                       style={{ backgroundColor: `${typeInfo.color}15`, border: `1px solid ${typeInfo.color}30` }}
                     >
-                      {typeInfo.icon}
+                      {typeInfo.icon && React.createElement(typeInfo.icon, { className: 'w-5 h-5', style: { color: typeInfo.color } })}
                     </div>
 
                     <div className="flex-1 min-w-0">
@@ -450,8 +458,9 @@ const EntitiesWorkspace = ({ investigationId, onNavigateToGraph, onNavigateToEvi
                             <ArrowRight className={`w-3 h-3 text-slate-500 ${isSource ? '' : 'rotate-180'}`} />
                             <span className="text-slate-400">{conn.relType.replace('_', ' ')}</span>
                             {connectedEntity && (
-                              <span className="text-white">
-                                {connectedTypeInfo?.icon} {connectedEntity.label || connectedEntity.value}
+                              <span className="text-white flex items-center gap-1">
+                                {connectedTypeInfo?.icon && React.createElement(connectedTypeInfo.icon, { className: 'w-3 h-3', style: { color: connectedTypeInfo.color } })}
+                                {connectedEntity.label || connectedEntity.value}
                               </span>
                             )}
                           </div>
@@ -479,11 +488,17 @@ const EntityForm = ({ newEntity, setNewEntity, onSubmit }) => (
           <SelectValue />
         </SelectTrigger>
         <SelectContent className="bg-[#0a0a0a] border-white/10 text-white">
-          {ENTITY_TYPES.map(type => (
-            <SelectItem key={type.value} value={type.value}>
-              {type.icon} {type.label}
-            </SelectItem>
-          ))}
+          {ENTITY_TYPES.map(type => {
+            const TypeIcon = type.icon;
+            return (
+              <SelectItem key={type.value} value={type.value}>
+                <span className="flex items-center gap-2">
+                  <TypeIcon className="w-3.5 h-3.5" style={{ color: type.color }} />
+                  {type.label}
+                </span>
+              </SelectItem>
+            );
+          })}
         </SelectContent>
       </Select>
     </div>

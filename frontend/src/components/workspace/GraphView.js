@@ -9,7 +9,7 @@ import ReactFlow, {
   Panel,
 } from 'reactflow';
 import 'reactflow/dist/style.css';
-import { Plus, Link2, Trash2, X, Network, ArrowRight, FileBox, Users } from 'lucide-react';
+import { Plus, Link2, Trash2, X, Network, ArrowRight, FileBox, Users, User, Mail, Phone, Globe, Server, AtSign, Building2, Wallet, MessageSquare } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
@@ -25,16 +25,16 @@ const nodeTypes = {
 };
 
 const ENTITY_TYPES = [
-  { value: 'person', label: 'Person', icon: '👤', color: '#06b6d4' },
-  { value: 'email', label: 'Email', icon: '📧', color: '#14f195' },
-  { value: 'phone', label: 'Phone', icon: '📱', color: '#f97316' },
-  { value: 'domain', label: 'Domain', icon: '🌐', color: '#06b6d4' },
-  { value: 'ip', label: 'IP Address', icon: '🖥️', color: '#7c3aed' },
-  { value: 'username', label: 'Username', icon: '👨‍💻', color: '#14f195' },
-  { value: 'company', label: 'Company', icon: '🏢', color: '#f97316' },
-  { value: 'wallet', label: 'Wallet', icon: '💰', color: '#fbbf24' },
-  { value: 'social', label: 'Social Account', icon: '💬', color: '#3b82f6' },
-  { value: 'url', label: 'URL', icon: '🔗', color: '#06b6d4' },
+  { value: 'person', label: 'Person', icon: User, color: '#06b6d4' },
+  { value: 'email', label: 'Email', icon: Mail, color: '#14f195' },
+  { value: 'phone', label: 'Phone', icon: Phone, color: '#f97316' },
+  { value: 'domain', label: 'Domain', icon: Globe, color: '#06b6d4' },
+  { value: 'ip', label: 'IP Address', icon: Server, color: '#7c3aed' },
+  { value: 'username', label: 'Username', icon: AtSign, color: '#14f195' },
+  { value: 'company', label: 'Company', icon: Building2, color: '#f97316' },
+  { value: 'wallet', label: 'Wallet', icon: Wallet, color: '#fbbf24' },
+  { value: 'social', label: 'Social Account', icon: MessageSquare, color: '#3b82f6' },
+  { value: 'url', label: 'URL', icon: Link2, color: '#06b6d4' },
 ];
 
 const RELATIONSHIP_TYPES = [
@@ -375,11 +375,17 @@ const GraphView = ({ investigationId, onNavigateToEvidence, onNavigateToEntities
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent className="bg-[#0a0a0a] border-white/10 text-white">
-                      {ENTITY_TYPES.map(type => (
-                        <SelectItem key={type.value} value={type.value}>
-                          {type.icon} {type.label}
-                        </SelectItem>
-                      ))}
+                      {ENTITY_TYPES.map(type => {
+                        const TypeIcon = type.icon;
+                        return (
+                          <SelectItem key={type.value} value={type.value}>
+                            <span className="flex items-center gap-2">
+                              <TypeIcon className="w-3.5 h-3.5" style={{ color: type.color }} />
+                              {type.label}
+                            </span>
+                          </SelectItem>
+                        );
+                      })}
                     </SelectContent>
                   </Select>
                 </div>
