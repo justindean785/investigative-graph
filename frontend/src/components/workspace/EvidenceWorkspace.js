@@ -333,6 +333,7 @@ const EvidenceWorkspace = ({ investigationId, onNavigateToEntities }) => {
     if (files.length > 0) {
       handleFileUpload(files[0]);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Add detected entity to investigation

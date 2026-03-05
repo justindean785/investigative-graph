@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, FileBox, Users, Network, Clock, Sparkles, Search, Settings, Lightbulb, Brain } from 'lucide-react';
+import { ArrowLeft, FileBox, Users, Network, Clock, Sparkles, Search, Settings, Lightbulb, Brain, Crosshair } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
@@ -200,46 +200,47 @@ const InvestigationWorkspace = () => {
   return (
     <div className="h-screen flex flex-col bg-[#050505] overflow-hidden">
       {/* Header */}
-      <header className="h-14 border-b border-white/5 flex items-center justify-between px-4 bg-black/50 backdrop-blur-sm flex-shrink-0 z-20">
-        <div className="flex items-center gap-4">
+      <header className="border-b border-white/5 flex items-center justify-between px-4 bg-black/60 backdrop-blur-md flex-shrink-0 z-20" style={{ height: '52px' }}>
+        <div className="flex items-center gap-3">
           <Button
             variant="ghost"
             onClick={() => navigate('/')}
-            className="text-slate-400 hover:text-white h-8 px-2 gap-1.5 text-xs"
+            className="text-slate-500 hover:text-white h-7 px-2 gap-1.5 text-xs"
             data-testid="return-to-cases-btn"
           >
-            <ArrowLeft className="w-4 h-4" />
+            <ArrowLeft className="w-3.5 h-3.5" />
             Cases
           </Button>
           
-          <div className="h-5 w-px bg-white/10"></div>
+          <div className="h-4 w-px bg-white/8"></div>
           
-          <div className="flex items-center gap-3">
-            <div className="w-7 h-7 bg-primary/20 border border-primary/40 rounded-sm flex items-center justify-center text-primary text-sm font-bold">
-              T
+          <div className="flex items-center gap-2.5">
+            <div className="relative w-6 h-6 flex items-center justify-center flex-shrink-0">
+              <div className="absolute inset-0 bg-cyan-500/10 border border-cyan-500/30 rounded-sm" />
+              <Crosshair className="w-3.5 h-3.5 text-cyan-400 relative z-10" />
             </div>
             <div>
               <h1 className="text-white font-heading font-bold text-sm leading-tight">{investigation?.name}</h1>
-              <p className="text-[10px] text-slate-500 font-mono">{investigation?.case_id}</p>
+              <p className="text-[9px] text-slate-600 font-mono tracking-wider">{investigation?.case_id}</p>
             </div>
           </div>
         </div>
         
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2">
           <div className="relative">
-            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500" />
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3 h-3 text-slate-600" />
             <Input
               value={globalSearch}
               onChange={(e) => setGlobalSearch(e.target.value)}
-              className="pl-8 bg-black/30 border-white/10 h-8 w-48 text-xs"
+              className="pl-7 bg-black/40 border-white/8 h-7 w-40 text-xs"
               placeholder="Search..."
             />
           </div>
           <Button
             variant="ghost"
-            className="text-slate-400 hover:text-white h-8 w-8 p-0"
+            className="text-slate-600 hover:text-white h-7 w-7 p-0"
           >
-            <Settings className="w-4 h-4" />
+            <Settings className="w-3.5 h-3.5" />
           </Button>
         </div>
       </header>
@@ -247,8 +248,8 @@ const InvestigationWorkspace = () => {
       {/* Main Content with Tabs */}
       <div className="flex-1 flex overflow-hidden">
         {/* Left Tab Navigation */}
-        <nav className="w-16 border-r border-white/5 bg-black/30 flex flex-col items-center py-3 gap-1 flex-shrink-0">
-          {tabs.map((tab, index) => {
+        <nav className="w-14 border-r border-white/5 bg-black/40 flex flex-col items-center py-2 gap-0.5 flex-shrink-0">
+          {tabs.map((tab) => {
             const isActive = activeTab === tab.id;
             const TabIcon = tab.icon;
             
@@ -257,46 +258,45 @@ const InvestigationWorkspace = () => {
                 key={tab.id}
                 onClick={() => setActiveTab(tab.id)}
                 data-testid={`tab-${tab.id}`}
-                className={`relative w-12 h-12 rounded-sm flex flex-col items-center justify-center transition-all group ${
-                  isActive 
-                    ? 'bg-white/10' 
-                    : 'hover:bg-white/5'
-                }`}
-                title={tab.description}
+                title={`${tab.label} — ${tab.description}`}
+                className="relative w-11 h-11 rounded-sm flex flex-col items-center justify-center group"
+                style={{
+                  background: isActive ? `${tab.color}12` : 'transparent',
+                  transition: 'background 0.15s',
+                }}
+                onMouseEnter={e => { if (!isActive) e.currentTarget.style.background = 'rgba(255,255,255,0.04)'; }}
+                onMouseLeave={e => { if (!isActive) e.currentTarget.style.background = 'transparent'; }}
               >
-                {/* Active indicator */}
+                {/* Active indicator bar */}
                 {isActive && (
-                  <div 
-                    className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-6 rounded-r"
-                    style={{ backgroundColor: tab.color }}
+                  <div
+                    className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-5 rounded-r"
+                    style={{ background: tab.color }}
                   />
                 )}
                 
-                <TabIcon 
-                  className="w-4 h-4 mb-0.5" 
-                  style={{ color: isActive ? tab.color : '#64748b' }}
+                <TabIcon
+                  className="w-3.5 h-3.5 mb-0.5"
+                  style={{ color: isActive ? tab.color : '#475569' }}
                 />
-                <span className={`text-[9px] font-medium ${isActive ? 'text-white' : 'text-slate-500'}`}>
+                <span
+                  className="text-[8px] font-medium leading-none"
+                  style={{ color: isActive ? '#e2e8f0' : '#475569' }}
+                >
                   {tab.label}
                 </span>
                 
                 {/* Count badge */}
                 {tab.count !== null && tab.count > 0 && (
-                  <Badge 
-                    className="absolute -top-0.5 -right-0.5 h-4 min-w-4 px-1 text-[9px] border-0 flex items-center justify-center"
-                    style={{ 
-                      backgroundColor: `${tab.color}20`,
-                      color: tab.color 
+                  <div
+                    className="absolute -top-0.5 -right-0.5 h-3.5 min-w-3.5 px-0.5 rounded-sm text-[8px] font-mono font-bold flex items-center justify-center"
+                    style={{
+                      background: `${tab.color}20`,
+                      color: tab.color,
+                      border: `1px solid ${tab.color}30`,
                     }}
                   >
                     {tab.count}
-                  </Badge>
-                )}
-
-                {/* Workflow indicator (arrow) */}
-                {index < tabs.length - 1 && (
-                  <div className="absolute -bottom-1 left-1/2 -translate-x-1/2 text-slate-700 text-[8px]">
-                    ↓
                   </div>
                 )}
               </button>
