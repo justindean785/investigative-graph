@@ -7,15 +7,33 @@ import os
 import logging
 from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, AsyncGenerator
 import uuid
 from datetime import datetime, timezone
-from emergentintegrations.llm.chat import LlmChat, UserMessage
+import asyncio
+try:
+    from emergentintegrations.llm.chat import LlmChat, UserMessage
+    EMERGENT_AVAILABLE = True
+except Exception:
+    EMERGENT_AVAILABLE = False
 import json
 import re
 import httpx
 import base64
 from io import BytesIO
+
+try:
+    from google import genai as google_genai
+    from google.genai import types as genai_types
+    GENAI_AVAILABLE = True
+except ImportError:
+    GENAI_AVAILABLE = False
+
+try:
+    from openai import AsyncOpenAI
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
 
 # Optional OCR/PDF imports
 try:
@@ -47,6 +65,19 @@ db = client[os.environ['DB_NAME']]
 
 API_KEY = os.environ.get('API_KEY', 'trace-analyst-secret-2026')
 EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY')
+
+# AI Engine API keys
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
+SWATTED_API_KEY = os.environ.get('SWATTED_API_KEY')
+SWATTED_API_URL = os.environ.get('SWATTED_API_URL', 'https://swattedw.tf/api/v1')
+PERPLEXITY_API_KEY = os.environ.get('PERPLEXITY_API_KEY')
+BOSINT_API_KEY = os.environ.get('BOSINT_API_KEY')
+BOSINT_BASE_URL = os.environ.get('BOSINT_API_URL', 'https://app.bosint.gg/bosintapi')
+
+# Configure Gemini client
+_gemini_client = None
+if GENAI_AVAILABLE and GEMINI_API_KEY:
+    _gemini_client = google_genai.Client(api_key=GEMINI_API_KEY)
 
 # Create the main app without a prefix
 app = FastAPI()
@@ -241,6 +272,16 @@ class RawTextIngestRequest(BaseModel):
     title: str = ""
     evidence_type: str = "raw_text"
     notes: str = ""
+
+class AIInvestigateRequest(BaseModel):
+    input_text: str
+    auto_expand: bool = True
+    scan_depth: str = "standard"  # quick, standard, deep
+
+class ScanRequest(BaseModel):
+    query: str
+    entity_id: Optional[str] = None
+    save_results: bool = True
 
 # ============= EXPANDED EVIDENCE CATEGORIES =============
 
@@ -1288,6 +1329,805 @@ def generate_investigation_leads(entities: List[Dict], relationships: List[Dict]
     
     return leads
 
+# ============= AI ENGINE FUNCTIONS =============
+
+async def call_gemini_api(prompt: str, system_instruction: str = None, json_mode: bool = False) -> str:
+    """Call Gemini 2.0 Flash via google-genai SDK for AI reasoning tasks"""
+    if not GENAI_AVAILABLE or not _gemini_client:
+        return json.dumps({"error": "Gemini API not configured"}) if json_mode else "Gemini API not configured."
+    try:
+        contents = prompt
+        config = genai_types.GenerateContentConfig(
+            temperature=0.3,
+            max_output_tokens=4096,
+            system_instruction=system_instruction or "You are an expert OSINT investigator and intelligence analyst.",
+        )
+        response = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: _gemini_client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=contents,
+                config=config,
+            )
+        )
+        text = response.text.strip() if response.text else ""
+        if json_mode:
+            if "```json" in text:
+                text = text.split("```json")[1].split("```")[0].strip()
+            elif "```" in text:
+                text = text.split("```")[1].split("```")[0].strip()
+        return text
+    except Exception as e:
+        logger.error(f"Gemini API error: {e}")
+        return json.dumps({"error": str(e)}) if json_mode else f"AI analysis error: {str(e)}"
+
+
+async def call_perplexity_search(query: str) -> str:
+    """Call Perplexity sonar-pro for real-time web OSINT research"""
+    if not OPENAI_AVAILABLE or not PERPLEXITY_API_KEY:
+        return "Perplexity not configured."
+    try:
+        client = AsyncOpenAI(api_key=PERPLEXITY_API_KEY, base_url="https://api.perplexity.ai")
+        response = await client.chat.completions.create(
+            model="sonar-pro",
+            messages=[
+                {"role": "system", "content": "You are an OSINT research assistant. Provide factual, sourced information. Be concise and structured."},
+                {"role": "user", "content": query}
+            ],
+            max_tokens=2048,
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        logger.error(f"Perplexity API error: {e}")
+        return f"Search unavailable: {str(e)}"
+
+
+async def bosint_api_call(command: str, query: str) -> Dict[str, Any]:
+    """Call BOSINT API for real OSINT data"""
+    if not BOSINT_API_KEY:
+        return {"error": "BOSINT not configured", "data": None}
+    try:
+        url = f"{BOSINT_BASE_URL}/{BOSINT_API_KEY}/{command}/{query}"
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            response = await client.get(url, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "application/json",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Referer": "https://app.bosint.gg/",
+                "Origin": "https://app.bosint.gg",
+            })
+            if response.status_code == 200:
+                try:
+                    return {"error": None, "data": response.json()}
+                except Exception:
+                    return {"error": None, "data": {"raw": response.text[:2000]}}
+            else:
+                logger.warning(f"BOSINT API returned {response.status_code} for {command}/{query}")
+                return {"error": f"HTTP {response.status_code}", "data": None}
+    except Exception as e:
+        logger.error(f"BOSINT API error for {command}/{query}: {e}")
+        return {"error": str(e), "data": None}
+
+
+async def save_entity_to_db(investigation_id: str, entity_type: str, value: str, label: str = None,
+                             metadata: Dict = None, confidence: float = 0.8, risk_score: float = 0.3,
+                             sources: List[str] = None, notes: str = "") -> Dict:
+    """Save an entity to MongoDB, deduplicating by type+value"""
+    existing = await db.entities.find_one({
+        "investigation_id": investigation_id,
+        "entity_type": entity_type,
+        "value": value
+    }, {"_id": 0})
+    if existing:
+        return existing
+
+    entity = Entity(
+        investigation_id=investigation_id,
+        entity_type=entity_type,
+        value=value,
+        label=label or value,
+        metadata=metadata or {},
+        confidence=confidence,
+        risk_score=risk_score,
+        sources=sources or [],
+        notes=notes
+    )
+    doc = serialize_datetime(entity.model_dump())
+    await db.entities.insert_one(doc)
+    await create_timeline_event(
+        investigation_id, "entity_added",
+        f"AI discovered {entity_type}: {value}",
+        entity_id=entity.id,
+        metadata={"source": "ai_investigation", "auto_discovered": True}
+    )
+    return doc
+
+
+async def save_relationship_to_db(investigation_id: str, source_id: str, target_id: str,
+                                   rel_type: str, label: str = "", confidence: float = 0.75,
+                                   metadata: Dict = None) -> Optional[Dict]:
+    """Save a relationship to MongoDB, deduplicating"""
+    existing = await db.relationships.find_one({
+        "investigation_id": investigation_id,
+        "source_entity_id": source_id,
+        "target_entity_id": target_id,
+        "relationship_type": rel_type
+    }, {"_id": 0})
+    if existing:
+        return existing
+
+    rel = Relationship(
+        investigation_id=investigation_id,
+        source_entity_id=source_id,
+        target_entity_id=target_id,
+        relationship_type=rel_type,
+        label=label,
+        metadata=metadata or {},
+        confidence=confidence
+    )
+    doc = serialize_datetime(rel.model_dump())
+    await db.relationships.insert_one(doc)
+    await create_timeline_event(
+        investigation_id, "relationship_discovered",
+        f"AI linked: {rel_type}",
+        metadata={"auto_discovered": True}
+    )
+    return doc
+
+
+async def ai_extract_entities_from_input(input_text: str) -> List[Dict]:
+    """Use Gemini to parse and classify entities from raw investigative input"""
+    prompt = f"""Analyze this investigative input and extract all identifiers/entities.
+
+Input: {input_text}
+
+Extract every distinct identifier. For each, return:
+- entity_type: one of [person, username, email, phone, domain, ip, company, wallet, social, url, hash]
+- value: the exact identifier value
+- confidence: 0.0-1.0
+- label: human-readable label
+- notes: brief context about why this was extracted
+
+Return ONLY a JSON array. Example:
+[
+  {{"entity_type": "username", "value": "shadowhunter77", "confidence": 0.95, "label": "Username: shadowhunter77", "notes": "Primary identifier from input"}},
+  {{"entity_type": "email", "value": "john@example.com", "confidence": 0.99, "label": "Email Address", "notes": "Email found in input"}}
+]
+
+If only one entity is apparent, return an array with just that one item.
+Do not invent entities that are not present. Be precise."""
+
+    try:
+        result = await call_gemini_api(prompt, json_mode=True)
+        parsed = json.loads(result)
+        if isinstance(parsed, list):
+            return parsed
+        return []
+    except Exception as e:
+        logger.error(f"Entity extraction error: {e}")
+        return extract_entities_from_text(input_text)[:5]
+
+
+async def ai_infer_relationships(entities: List[Dict]) -> List[Dict]:
+    """Use Gemini to infer relationships between a set of entities"""
+    if len(entities) < 2:
+        return []
+
+    entity_list = "\n".join([f"- ID:{e['id']} TYPE:{e['entity_type']} VALUE:{e['value']}" for e in entities[:30]])
+    prompt = f"""Given these entities from an OSINT investigation, infer probable relationships between them.
+
+Entities:
+{entity_list}
+
+For each probable relationship, return:
+- source_id: entity ID of source
+- target_id: entity ID of target
+- relationship_type: one of [owns, registered, resolves_to, used_on, interacts_with, linked_to, employed_by, located_at, alias_of]
+- label: short description
+- confidence: 0.0-1.0
+- reasoning: brief explanation
+
+Rules:
+- Only infer relationships with confidence > 0.5
+- Focus on email→domain (registered), username→social (used_on), domain→ip (resolves_to)
+- Return ONLY a JSON array. Return empty array [] if no strong relationships found.
+
+Example:
+[
+  {{"source_id": "id1", "target_id": "id2", "relationship_type": "registered", "label": "Registered domain", "confidence": 0.85, "reasoning": "Email domain matches"}}
+]"""
+
+    try:
+        result = await call_gemini_api(prompt, json_mode=True)
+        parsed = json.loads(result)
+        return parsed if isinstance(parsed, list) else []
+    except Exception as e:
+        logger.error(f"Relationship inference error: {e}")
+        return []
+
+
+async def process_bosint_username_results(investigation_id: str, username: str, bosint_data: Dict) -> List[Dict]:
+    """Parse BOSINT username results and create platform entities"""
+    created_entities = []
+    data = bosint_data.get("data") or {}
+
+    # Handle various BOSINT response formats
+    accounts = []
+    if isinstance(data, dict):
+        accounts = data.get("accounts", data.get("results", data.get("platforms", [])))
+        if isinstance(accounts, dict):
+            accounts = [{"platform": k, **v} for k, v in accounts.items()]
+    elif isinstance(data, list):
+        accounts = data
+
+    for account in accounts[:50]:
+        if not isinstance(account, dict):
+            continue
+        platform = account.get("platform", account.get("site", account.get("name", "unknown")))
+        url = account.get("url", account.get("profile_url", account.get("link", "")))
+        found = account.get("found", account.get("exists", account.get("status", "unknown")))
+
+        if str(found).lower() in ["false", "0", "not found", "no"]:
+            continue
+
+        if url and platform:
+            entity = await save_entity_to_db(
+                investigation_id, "social",
+                url or f"{platform}/{username}",
+                label=f"{platform}: @{username}",
+                metadata={"platform": platform, "username": username, "status": str(found)},
+                confidence=0.85,
+                risk_score=0.2,
+                sources=["bosint_username_search"],
+                notes=f"Found on {platform} via BOSINT username search"
+            )
+            created_entities.append(entity)
+
+    return created_entities
+
+
+async def run_perplexity_osint(investigation_id: str, entity_type: str, value: str) -> str:
+    """Run Perplexity search for an entity to get web intelligence"""
+    queries = {
+        "username": f'OSINT research: username "{value}" - find all social media profiles, mentions, associated accounts and real identity clues',
+        "email": f'OSINT research: email "{value}" - find associated accounts, data breaches, domain registration, public mentions',
+        "domain": f'OSINT research: domain "{value}" - find ownership, hosting infrastructure, associated emails, historical data, suspicious activity',
+        "ip": f'OSINT research: IP address "{value}" - find geolocation, ASN, hosting provider, abuse reports, associated domains',
+        "phone": f'OSINT research: phone number "{value}" - find owner, location, carrier, associated accounts',
+        "wallet": f'OSINT research: cryptocurrency wallet "{value}" - find transaction history, exchange interactions, associated entities',
+        "person": f'OSINT research: person named "{value}" - find social media, professional background, public records, associations',
+    }
+    query = queries.get(entity_type, f'OSINT research on {entity_type}: "{value}"')
+    return await call_perplexity_search(query)
+
+
+async def ai_generate_leads_from_context(investigation_id: str, entities: List[Dict],
+                                          relationships: List[Dict], scan_summaries: List[str]) -> List[Dict]:
+    """Use Gemini to generate high-quality investigation leads from collected data"""
+    entity_summary = "\n".join([f"- {e['entity_type']}: {e['value']} (risk: {e.get('risk_score', 0):.1f})" for e in entities[:20]])
+    rel_summary = "\n".join([f"- {r.get('relationship_type', '?')}: entity connection" for r in relationships[:10]])
+    scan_text = "\n\n".join(scan_summaries[:5]) if scan_summaries else "No scan data available."
+
+    prompt = f"""You are an expert OSINT investigator analyzing a case. Generate actionable investigation leads.
+
+ENTITIES DISCOVERED:
+{entity_summary or "None yet"}
+
+RELATIONSHIPS:
+{rel_summary or "None yet"}
+
+SCAN INTELLIGENCE:
+{scan_text[:3000]}
+
+Generate 3-7 high-quality investigation leads. For each lead provide:
+- title: clear actionable title
+- description: detailed explanation
+- lead_type: one of [alias_cluster, shared_infrastructure, username_reuse, high_risk_connection, identity_pivot, data_breach_exposure, dark_web_presence]
+- severity: critical/high/medium/low
+- confidence: 0.0-1.0
+- suggested_actions: array of action strings (e.g. "Check username on gaming platforms", "Run dark web search for email")
+
+Return ONLY a JSON array:
+[
+  {{
+    "title": "...",
+    "description": "...",
+    "lead_type": "...",
+    "severity": "high",
+    "confidence": 0.85,
+    "suggested_actions": ["action 1", "action 2"]
+  }}
+]"""
+
+    try:
+        result = await call_gemini_api(prompt, json_mode=True)
+        leads_data = json.loads(result)
+        return leads_data if isinstance(leads_data, list) else []
+    except Exception as e:
+        logger.error(f"AI lead generation error: {e}")
+        return []
+
+
+SWATTED_BASE = "https://swattedw.tf"
+
+async def _swatted_login() -> Optional[Dict[str, str]]:
+    """Exchange account token for fresh session credentials. CSRF is single-use so we call this before every POST."""
+    if not SWATTED_API_KEY:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.post(
+                f"{SWATTED_BASE}/api/login_token_api",
+                json={"api_key": SWATTED_API_KEY},
+                headers={"Content-Type": "application/json"}
+            )
+            if r.status_code == 200:
+                d = r.json()
+                return {
+                    "session": d["sessionToken"],
+                    "user_id": d["userID"],
+                    "csrf": d["csrfToken"],
+                    "cookies": dict(r.cookies)
+                }
+    except Exception as e:
+        logger.error(f"Swatted login error: {e}")
+    return None
+
+
+async def swatted_post(endpoint: str, body: Dict) -> Dict[str, Any]:
+    """Make an authenticated POST to Swatted. Handles fresh CSRF per request."""
+    creds = await _swatted_login()
+    if not creds:
+        return {"error": "Swatted login failed", "data": None, "success": False}
+    try:
+        async with httpx.AsyncClient(timeout=30.0, cookies=creds["cookies"]) as client:
+            r = await client.post(
+                f"{SWATTED_BASE}{endpoint}",
+                json=body,
+                headers={
+                    "Authorization": f"Bearer {creds['session']}",
+                    "X-User-ID": creds["user_id"],
+                    "X-CSRF-Token": creds["csrf"],
+                    "Content-Type": "application/json",
+                }
+            )
+            d = r.json()
+            return {"error": None if d.get("success") else d.get("error", "unknown"), "data": d, "success": bool(d.get("success"))}
+    except Exception as e:
+        logger.error(f"Swatted POST {endpoint} error: {e}")
+        return {"error": str(e), "data": None, "success": False}
+
+
+async def swatted_get(endpoint: str) -> Dict[str, Any]:
+    """Make an authenticated GET to Swatted. Can reuse session token (no CSRF needed)."""
+    creds = await _swatted_login()
+    if not creds:
+        return {"error": "Swatted login failed", "data": None, "success": False}
+    try:
+        async with httpx.AsyncClient(timeout=30.0, cookies=creds["cookies"]) as client:
+            r = await client.get(
+                f"{SWATTED_BASE}{endpoint}",
+                headers={
+                    "Authorization": f"Bearer {creds['session']}",
+                    "X-User-ID": creds["user_id"],
+                }
+            )
+            d = r.json()
+            return {"error": None if d.get("success") else d.get("error", "unknown"), "data": d, "success": bool(d.get("success"))}
+    except Exception as e:
+        logger.error(f"Swatted GET {endpoint} error: {e}")
+        return {"error": str(e), "data": None, "success": False}
+
+
+async def swatted_breach_lookup(query: str, query_type: str = "email") -> Dict[str, Any]:
+    """Unified Swatted breach lookup — tries LeakCheck, HackCheck, LeakOSINT in parallel."""
+    if not SWATTED_API_KEY:
+        return {"error": "Swatted API not configured", "data": None}
+
+    results = {}
+    endpoints = [
+        ("/api/leakcheck/v2", "leakcheck"),
+        ("/api/hackcheck", "hackcheck"),
+        ("/api/leakosint/search", "leakosint"),
+    ]
+    for endpoint, name in endpoints:
+        try:
+            r = await swatted_post(endpoint, {"query": query})
+            if r.get("success"):
+                results[name] = r["data"]
+        except Exception as e:
+            logger.warning(f"Swatted {name} error: {e}")
+
+    if results:
+        return {"error": None, "data": results, "success": True}
+    return {"error": "No Swatted breach sources returned data", "data": None, "success": False}
+
+
+async def swatted_full_breach_scan(query: str) -> Dict[str, Any]:
+    """Run all available working breach sources against a query."""
+    if not SWATTED_API_KEY:
+        return {"error": "Swatted API not configured", "data": {}}
+
+    results = {}
+    breach_endpoints = [
+        ("/api/leakcheck/v2", "LeakCheck"),
+        ("/api/hackcheck", "HackCheck"),
+        ("/api/leakosint/search", "LeakOSINT"),
+        ("/api/breachbase", "BreachBase"),
+        ("/api/intelvault", "IntelVault"),
+        ("/api/osintdog/breachvip/search", "BreachVIP"),
+    ]
+
+    async def run_one(endpoint, name):
+        try:
+            r = await swatted_post(endpoint, {"query": query})
+            if r.get("success"):
+                results[name] = r["data"]
+        except Exception as e:
+            logger.warning(f"Swatted {name} scan error: {e}")
+
+    await asyncio.gather(*[run_one(ep, name) for ep, name in breach_endpoints])
+    return {"error": None if results else "No results", "data": results, "success": bool(results)}
+
+
+async def investigation_engine_stream(investigation_id: str, input_text: str, auto_expand: bool, scan_depth: str) -> AsyncGenerator[str, None]:
+    """Main AI investigation engine - yields SSE events as investigation progresses"""
+
+    async def emit(event_type: str, data: Dict) -> str:
+        payload = {"type": event_type, "timestamp": datetime.now(timezone.utc).isoformat(), **data}
+        return f"data: {json.dumps(payload)}\n\n"
+
+    scan_summaries = []
+    all_created_entities = []
+
+    try:
+        yield await emit("status", {"message": "AI Investigation Engine activated", "phase": "init"})
+        await asyncio.sleep(0.1)
+
+        # Phase 1: AI Entity Extraction
+        yield await emit("status", {"message": "Analyzing input with Gemini AI...", "phase": "extraction"})
+        ai_entities = await ai_extract_entities_from_input(input_text)
+
+        if not ai_entities:
+            yield await emit("error", {"message": "Could not extract any entities from input. Please provide a username, email, domain, IP, or other identifier."})
+            return
+
+        yield await emit("status", {"message": f"Detected {len(ai_entities)} entity/entities", "phase": "extraction", "count": len(ai_entities)})
+
+        # Save extracted entities to DB
+        saved_seed_entities = []
+        for ent in ai_entities:
+            if not ent.get("value"):
+                continue
+            saved = await save_entity_to_db(
+                investigation_id,
+                ent.get("entity_type", "unknown"),
+                ent["value"],
+                label=ent.get("label", ent["value"]),
+                confidence=ent.get("confidence", 0.8),
+                notes=ent.get("notes", "Extracted from investigative input"),
+                sources=["ai_entity_extraction"]
+            )
+            saved_seed_entities.append(saved)
+            all_created_entities.append(saved)
+            yield await emit("entity_discovered", {
+                "entity": {
+                    "id": saved["id"],
+                    "entity_type": saved["entity_type"],
+                    "value": saved["value"],
+                    "label": saved.get("label", saved["value"]),
+                    "confidence": saved.get("confidence", 0.8),
+                    "risk_score": saved.get("risk_score", 0.3),
+                    "source": "ai_extraction"
+                }
+            })
+
+        # Phase 2: BOSINT Scans
+        for seed_entity in saved_seed_entities:
+            etype = seed_entity.get("entity_type")
+            value = seed_entity.get("value")
+
+            if etype == "username":
+                yield await emit("scan_start", {"scan": "bosint_username", "query": value, "description": f"Searching 3,000+ platforms for @{value}..."})
+                bosint_result = await bosint_api_call("username", value)
+
+                if bosint_result.get("data"):
+                    new_entities = await process_bosint_username_results(investigation_id, value, bosint_result)
+                    all_created_entities.extend(new_entities)
+                    scan_summaries.append(f"Username scan for '{value}': found {len(new_entities)} platform profiles. Data: {json.dumps(bosint_result.get('data', {}))[:1000]}")
+
+                    for ne in new_entities:
+                        yield await emit("entity_discovered", {
+                            "entity": {
+                                "id": ne["id"],
+                                "entity_type": ne["entity_type"],
+                                "value": ne["value"],
+                                "label": ne.get("label", ne["value"]),
+                                "confidence": ne.get("confidence", 0.8),
+                                "risk_score": ne.get("risk_score", 0.2),
+                                "source": "bosint_username"
+                            }
+                        })
+                        if ne.get("id") != seed_entity.get("id"):
+                            await save_relationship_to_db(
+                                investigation_id, seed_entity["id"], ne["id"],
+                                "used_on", f"@{value} on platform",
+                                confidence=0.85,
+                                metadata={"source": "bosint_username_search"}
+                            )
+
+                    yield await emit("scan_complete", {
+                        "scan": "bosint_username",
+                        "query": value,
+                        "entities_found": len(new_entities),
+                        "message": f"Found {len(new_entities)} platform profiles for @{value}"
+                    })
+                else:
+                    scan_summaries.append(f"Username scan for '{value}': BOSINT returned no results or error: {bosint_result.get('error', 'unknown')}")
+                    yield await emit("scan_complete", {"scan": "bosint_username", "query": value, "entities_found": 0, "message": "No platform profiles found in BOSINT database"})
+
+            elif etype == "email":
+                # BOSINT email breach
+                yield await emit("scan_start", {"scan": "bosint_email", "query": value, "description": f"Checking BOSINT breach databases for {value}..."})
+                bosint_result = await bosint_api_call("email", value)
+                breach_data_combined = {}
+
+                if bosint_result.get("data"):
+                    breach_data_combined["bosint"] = bosint_result["data"]
+                    scan_summaries.append(f"BOSINT email breach for '{value}': {json.dumps(bosint_result['data'])[:800]}")
+                    await db.entities.update_one({"id": seed_entity["id"]}, {"$set": {"metadata.bosint_breach": bosint_result["data"], "risk_score": 0.7}})
+
+                # Swatted full breach scan (LeakCheck + HackCheck + LeakOSINT + BreachBase + IntelVault + BreachVIP)
+                yield await emit("scan_start", {"scan": "swatted_breach", "query": value, "description": f"Querying 6 breach databases via Swatted for {value}..."})
+                swatted_result = await swatted_full_breach_scan(value)
+                if swatted_result.get("data"):
+                    breach_data_combined["swatted"] = swatted_result["data"]
+                    scan_summaries.append(f"Swatted full breach scan for '{value}': {json.dumps(swatted_result['data'])[:1500]}")
+                    await db.entities.update_one({"id": seed_entity["id"]}, {"$set": {
+                        "metadata.swatted_breach": swatted_result["data"],
+                        "risk_score": 0.8
+                    }})
+                    # Extract usernames from breach data for further expansion
+                    breach_usernames = set()
+                    for source_data in swatted_result["data"].values():
+                        results_list = source_data.get("results", [])
+                        if isinstance(results_list, list):
+                            for record in results_list[:10]:
+                                if isinstance(record, dict):
+                                    if record.get("username"):
+                                        breach_usernames.add(record["username"])
+                    for uname in list(breach_usernames)[:3]:
+                        saved = await save_entity_to_db(
+                            investigation_id, "username", uname,
+                            label=f"Username: {uname}",
+                            confidence=0.9, risk_score=0.5,
+                            sources=["swatted_breach_data"],
+                            notes=f"Username extracted from breach records for {value}"
+                        )
+                        all_created_entities.append(saved)
+                        yield await emit("entity_discovered", {
+                            "entity": {
+                                "id": saved["id"], "entity_type": "username",
+                                "value": uname, "label": f"Username: {uname}",
+                                "confidence": 0.9, "risk_score": 0.5,
+                                "source": "swatted_breach"
+                            }
+                        })
+                        await save_relationship_to_db(
+                            investigation_id, seed_entity["id"], saved["id"],
+                            "linked_to", "Breach-linked username",
+                            confidence=0.9, metadata={"source": "swatted_breach_extraction"}
+                        )
+
+                yield await emit("scan_complete", {
+                    "scan": "email_breach",
+                    "query": value,
+                    "entities_found": len(breach_data_combined.get("swatted", {})),
+                    "breach_data": breach_data_combined,
+                    "message": f"Breach scan complete: {len(breach_data_combined.get('swatted', {}))} sources returned data" if breach_data_combined else "No breach data found"
+                })
+
+            elif etype == "domain":
+                yield await emit("scan_start", {"scan": "bosint_domain", "query": value, "description": f"Running domain intelligence on {value}..."})
+                bosint_result = await bosint_api_call("domain", value)
+
+                if bosint_result.get("data"):
+                    data = bosint_result["data"]
+                    scan_summaries.append(f"Domain intel for '{value}': {json.dumps(data)[:1000]}")
+                    await db.entities.update_one({"id": seed_entity["id"]}, {"$set": {"metadata.domain_intel": data}})
+                    yield await emit("scan_complete", {"scan": "bosint_domain", "query": value, "entities_found": 0, "domain_data": data, "message": f"Domain intelligence retrieved for {value}"})
+                else:
+                    scan_summaries.append(f"Domain scan for '{value}': {bosint_result.get('error', 'no data')}")
+                    yield await emit("scan_complete", {"scan": "bosint_domain", "query": value, "entities_found": 0, "message": "No domain intelligence available"})
+
+            elif etype == "ip":
+                yield await emit("scan_start", {"scan": "bosint_ip", "query": value, "description": f"Running IP intelligence on {value}..."})
+                bosint_result = await bosint_api_call("ip", value)
+
+                if bosint_result.get("data"):
+                    data = bosint_result["data"]
+                    scan_summaries.append(f"IP intel for '{value}': {json.dumps(data)[:1000]}")
+                    await db.entities.update_one({"id": seed_entity["id"]}, {"$set": {"metadata.ip_intel": data}})
+                    yield await emit("scan_complete", {"scan": "bosint_ip", "query": value, "entities_found": 0, "ip_data": data, "message": f"IP intelligence retrieved for {value}"})
+                else:
+                    scan_summaries.append(f"IP scan for '{value}': {bosint_result.get('error', 'no data')}")
+                    yield await emit("scan_complete", {"scan": "bosint_ip", "query": value, "entities_found": 0, "message": "No IP intelligence available"})
+
+            elif etype == "phone":
+                yield await emit("scan_start", {"scan": "bosint_phone", "query": value, "description": f"Running phone intelligence on {value}..."})
+                bosint_result = await bosint_api_call("phone", value.replace("+", "").replace(" ", "").replace("-", ""))
+
+                if bosint_result.get("data"):
+                    data = bosint_result["data"]
+                    scan_summaries.append(f"Phone intel for '{value}': {json.dumps(data)[:1000]}")
+                    await db.entities.update_one({"id": seed_entity["id"]}, {"$set": {"metadata.phone_intel": data}})
+                    yield await emit("scan_complete", {"scan": "bosint_phone", "query": value, "entities_found": 0, "phone_data": data, "message": f"Phone intelligence retrieved"})
+                else:
+                    scan_summaries.append(f"Phone scan for '{value}': {bosint_result.get('error', 'no data')}")
+                    yield await emit("scan_complete", {"scan": "bosint_phone", "query": value, "entities_found": 0, "message": "No phone intelligence available"})
+
+            # Phase 3: Perplexity Deep Search (for standard/deep scans)
+            if scan_depth in ["standard", "deep"] and etype in ["username", "email", "domain", "person"]:
+                yield await emit("scan_start", {"scan": "perplexity_search", "query": value, "description": f"Running Perplexity AI deep web search for {value}..."})
+                perplexity_result = await run_perplexity_osint(investigation_id, etype, value)
+
+                scan_summaries.append(f"Perplexity web search for {etype} '{value}':\n{perplexity_result[:1500]}")
+
+                # Extract entities from Perplexity results
+                regex_entities = extract_entities_from_text(perplexity_result, None)
+                new_perplexity_entities = []
+
+                for rex_ent in regex_entities[:10]:
+                    if rex_ent["value"] == value:
+                        continue
+                    saved = await save_entity_to_db(
+                        investigation_id,
+                        rex_ent["type"],
+                        rex_ent["value"],
+                        label=rex_ent.get("label", rex_ent["value"]),
+                        confidence=rex_ent.get("confidence", 0.6),
+                        risk_score=rex_ent.get("risk_score", 0.3),
+                        sources=["perplexity_search"],
+                        notes=f"Discovered via Perplexity web search for {value}"
+                    )
+                    new_perplexity_entities.append(saved)
+                    all_created_entities.append(saved)
+                    yield await emit("entity_discovered", {
+                        "entity": {
+                            "id": saved["id"],
+                            "entity_type": saved["entity_type"],
+                            "value": saved["value"],
+                            "label": saved.get("label", saved["value"]),
+                            "confidence": saved.get("confidence", 0.6),
+                            "risk_score": saved.get("risk_score", 0.3),
+                            "source": "perplexity_search"
+                        }
+                    })
+
+                yield await emit("scan_complete", {
+                    "scan": "perplexity_search",
+                    "query": value,
+                    "entities_found": len(new_perplexity_entities),
+                    "summary": perplexity_result[:500],
+                    "message": f"Perplexity found {len(new_perplexity_entities)} additional entities"
+                })
+
+        # Phase 4: BOSINT Dark Web Search
+        if scan_depth in ["standard", "deep"]:
+            primary_value = saved_seed_entities[0]["value"] if saved_seed_entities else input_text[:50]
+            yield await emit("scan_start", {"scan": "darkweb_search", "query": primary_value, "description": f"Scanning dark web for mentions of {primary_value}..."})
+            dw_result = await bosint_api_call("darkweb", primary_value)
+
+            if dw_result.get("data"):
+                scan_summaries.append(f"Dark web scan for '{primary_value}': {json.dumps(dw_result['data'])[:1000]}")
+                yield await emit("scan_complete", {
+                    "scan": "darkweb_search",
+                    "query": primary_value,
+                    "entities_found": 0,
+                    "darkweb_data": dw_result["data"],
+                    "message": "Dark web intelligence retrieved"
+                })
+            else:
+                yield await emit("scan_complete", {"scan": "darkweb_search", "query": primary_value, "entities_found": 0, "message": "No dark web mentions found"})
+
+        # Phase 5: AI Relationship Inference
+        yield await emit("status", {"message": "AI inferring relationships between discovered entities...", "phase": "relationship_analysis"})
+
+        all_current_entities = await db.entities.find({"investigation_id": investigation_id}, {"_id": 0}).to_list(100)
+        inferred_rels = await ai_infer_relationships(all_current_entities)
+        saved_rels = []
+
+        for rel in inferred_rels:
+            src_id = rel.get("source_id")
+            tgt_id = rel.get("target_id")
+            if src_id and tgt_id and src_id != tgt_id:
+                saved_rel = await save_relationship_to_db(
+                    investigation_id, src_id, tgt_id,
+                    rel.get("relationship_type", "linked_to"),
+                    rel.get("label", ""),
+                    confidence=rel.get("confidence", 0.7),
+                    metadata={"reasoning": rel.get("reasoning", ""), "source": "ai_inference"}
+                )
+                if saved_rel:
+                    saved_rels.append(saved_rel)
+                    yield await emit("relationship_discovered", {
+                        "relationship": {
+                            "id": saved_rel["id"],
+                            "source_id": src_id,
+                            "target_id": tgt_id,
+                            "type": rel.get("relationship_type", "linked_to"),
+                            "label": rel.get("label", ""),
+                            "confidence": rel.get("confidence", 0.7),
+                            "reasoning": rel.get("reasoning", "")
+                        }
+                    })
+
+        yield await emit("status", {"message": f"Discovered {len(saved_rels)} relationships", "phase": "relationship_analysis", "count": len(saved_rels)})
+
+        # Phase 6: AI Lead Generation
+        yield await emit("status", {"message": "Gemini AI generating investigation leads...", "phase": "lead_generation"})
+
+        all_final_entities = await db.entities.find({"investigation_id": investigation_id}, {"_id": 0}).to_list(100)
+        all_final_rels = await db.relationships.find({"investigation_id": investigation_id}, {"_id": 0}).to_list(100)
+
+        ai_leads = await ai_generate_leads_from_context(investigation_id, all_final_entities, all_final_rels, scan_summaries)
+
+        for lead_data in ai_leads:
+            lead = {
+                "id": f"lead_{uuid.uuid4().hex[:12]}",
+                "investigation_id": investigation_id,
+                "lead_type": lead_data.get("lead_type", "identity_pivot"),
+                "title": lead_data.get("title", "Investigation Lead"),
+                "description": lead_data.get("description", ""),
+                "confidence": lead_data.get("confidence", 0.7),
+                "severity": lead_data.get("severity", "medium"),
+                "affected_entities": [],
+                "evidence_ids": [],
+                "suggested_actions": [{"type": "investigate", "label": a, "action": "manual"} for a in lead_data.get("suggested_actions", [])],
+                "status": "new",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "metadata": {"source": "ai_investigation_engine", "scan_depth": scan_depth}
+            }
+            await db.investigation_leads.update_one(
+                {"id": lead["id"]}, {"$set": lead}, upsert=True
+            )
+            yield await emit("lead_generated", {"lead": lead})
+
+        # Also run the rule-based lead engine
+        rule_leads = generate_investigation_leads(all_final_entities, all_final_rels, [], [])
+        for rl in rule_leads[:5]:
+            rl["investigation_id"] = investigation_id
+            rl["created_at"] = datetime.now(timezone.utc).isoformat()
+            await db.investigation_leads.update_one({"id": rl["id"]}, {"$set": rl}, upsert=True)
+
+        # Create summary timeline event
+        await create_timeline_event(
+            investigation_id, "ai_analysis",
+            f"AI Investigation Engine completed: {len(all_created_entities)} entities, {len(saved_rels)} relationships, {len(ai_leads)} AI leads",
+            metadata={
+                "entities_discovered": len(all_created_entities),
+                "relationships_found": len(saved_rels),
+                "leads_generated": len(ai_leads),
+                "scan_depth": scan_depth,
+                "sources_checked": ["gemini_extraction", "bosint", "perplexity", "rule_engine"]
+            }
+        )
+
+        yield await emit("complete", {
+            "message": "AI Investigation Engine completed",
+            "stats": {
+                "entities_discovered": len(all_created_entities),
+                "relationships_found": len(saved_rels),
+                "leads_generated": len(ai_leads),
+                "scans_performed": len(scan_summaries)
+            }
+        })
+
+    except Exception as e:
+        logger.error(f"Investigation engine error: {e}", exc_info=True)
+        yield await emit("error", {"message": f"Investigation engine error: {str(e)}"})
+
+
 # ============= HELPER FUNCTIONS =============
 
 async def create_timeline_event(investigation_id: str, event_type: str, description: str, entity_id: Optional[str] = None, metadata: Dict = {}):
@@ -1670,18 +2510,24 @@ Format as JSON array with structure:
 ]
 """
         
-        # Choose model based on mode
-        model = "gemini-3-flash-preview" if input.mode == "flash" else "gemini-3-pro-preview"
-        
-        # Call Gemini
-        chat = LlmChat(
-            api_key=EMERGENT_LLM_KEY,
-            session_id=f"analysis-{input.investigation_id}",
-            system_message="You are an expert OSINT investigator providing actionable intelligence suggestions."
-        ).with_model("gemini", model)
-        
-        user_message = UserMessage(text=context)
-        response = await chat.send_message(user_message)
+        model = "gemini-1.5-flash"
+
+        if GENAI_AVAILABLE and GEMINI_API_KEY:
+            response = await call_gemini_api(
+                context,
+                system_instruction="You are an expert OSINT investigator providing actionable intelligence suggestions.",
+                json_mode=True
+            )
+        elif EMERGENT_AVAILABLE and EMERGENT_LLM_KEY:
+            chat = LlmChat(
+                api_key=EMERGENT_LLM_KEY,
+                session_id=f"analysis-{input.investigation_id}",
+                system_message="You are an expert OSINT investigator providing actionable intelligence suggestions."
+            ).with_model("gemini", "gemini-3-flash-preview")
+            user_message = UserMessage(text=context)
+            response = await chat.send_message(user_message)
+        else:
+            raise HTTPException(status_code=503, detail="No AI backend configured. Add GEMINI_API_KEY to .env")
         
         # Parse AI response
         try:
@@ -2510,6 +3356,438 @@ async def get_evidence_categories(x_api_key: Optional[str] = Header(None)):
     """Get all available evidence categories and types"""
     await validate_api_key(x_api_key)
     return EVIDENCE_CATEGORIES
+
+# ============= AI INVESTIGATION ENGINE =============
+
+@api_router.post("/investigations/{investigation_id}/ai/investigate")
+async def ai_investigate(
+    investigation_id: str,
+    request: AIInvestigateRequest,
+    x_api_key: Optional[str] = Header(None)
+):
+    """
+    Main AI Investigation Engine — streams SSE events as the AI investigates.
+    Accepts any raw input (username, email, domain, IP, phone, text snippet).
+    Automatically extracts entities, runs BOSINT/Perplexity/Swatted scans,
+    infers relationships, and generates AI leads.
+    """
+    await validate_api_key(x_api_key)
+
+    investigation = await db.investigations.find_one({"id": investigation_id}, {"_id": 0})
+    if not investigation:
+        raise HTTPException(status_code=404, detail="Investigation not found")
+
+    return StreamingResponse(
+        investigation_engine_stream(
+            investigation_id,
+            request.input_text,
+            request.auto_expand,
+            request.scan_depth
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        }
+    )
+
+
+@api_router.post("/investigations/{investigation_id}/scan/username")
+async def scan_username(
+    investigation_id: str,
+    request: ScanRequest,
+    x_api_key: Optional[str] = Header(None)
+):
+    """Run BOSINT username scan across 3,000+ platforms"""
+    await validate_api_key(x_api_key)
+
+    bosint_result = await bosint_api_call("username", request.query)
+    entities_created = []
+
+    if request.save_results and bosint_result.get("data"):
+        seed_entity = None
+        if request.entity_id:
+            seed_entity = await db.entities.find_one({"id": request.entity_id}, {"_id": 0})
+        else:
+            seed_entity = await save_entity_to_db(investigation_id, "username", request.query, sources=["manual_scan"])
+
+        new_entities = await process_bosint_username_results(investigation_id, request.query, bosint_result)
+        entities_created = new_entities
+
+        if seed_entity:
+            for ne in new_entities:
+                await save_relationship_to_db(
+                    investigation_id, seed_entity["id"], ne["id"],
+                    "used_on", f"@{request.query} on platform", confidence=0.85
+                )
+
+        await create_timeline_event(
+            investigation_id, "enrichment_run",
+            f"Username scan: @{request.query} found on {len(new_entities)} platforms",
+            metadata={"scan_type": "bosint_username", "query": request.query, "results": len(new_entities)}
+        )
+
+    return {
+        "success": True,
+        "query": request.query,
+        "scan_type": "bosint_username",
+        "raw_data": bosint_result.get("data"),
+        "entities_created": len(entities_created),
+        "entities": [serialize_datetime(e) for e in entities_created[:20]],
+        "error": bosint_result.get("error")
+    }
+
+
+@api_router.post("/investigations/{investigation_id}/scan/email")
+async def scan_email(
+    investigation_id: str,
+    request: ScanRequest,
+    x_api_key: Optional[str] = Header(None)
+):
+    """Run full email breach check via BOSINT + all Swatted breach sources"""
+    await validate_api_key(x_api_key)
+
+    bosint_result = await bosint_api_call("email", request.query)
+    swatted_result = await swatted_full_breach_scan(request.query)
+
+    combined = {
+        "bosint": bosint_result.get("data"),
+        "swatted": swatted_result.get("data"),
+    }
+
+    if request.save_results and request.entity_id:
+        await db.entities.update_one(
+            {"id": request.entity_id},
+            {"$set": {"metadata.breach_data": combined, "risk_score": 0.75}}
+        )
+        await create_timeline_event(
+            investigation_id, "enrichment_run",
+            f"Email breach scan: {request.query}",
+            metadata={"scan_type": "email_breach", "query": request.query, "sources": list(swatted_result.get("data", {}).keys())}
+        )
+
+    return {
+        "success": True,
+        "query": request.query,
+        "scan_type": "email_breach",
+        "breach_data": combined,
+        "sources_checked": list(swatted_result.get("data", {}).keys()),
+        "bosint_error": bosint_result.get("error"),
+        "swatted_error": swatted_result.get("error")
+    }
+
+
+@api_router.post("/investigations/{investigation_id}/scan/breach")
+async def scan_breach_full(
+    investigation_id: str,
+    request: ScanRequest,
+    x_api_key: Optional[str] = Header(None)
+):
+    """Run all 6 Swatted breach sources: LeakCheck, HackCheck, LeakOSINT, BreachBase, IntelVault, BreachVIP"""
+    await validate_api_key(x_api_key)
+
+    result = await swatted_full_breach_scan(request.query)
+
+    if request.save_results and request.entity_id and result.get("data"):
+        await db.entities.update_one(
+            {"id": request.entity_id},
+            {"$set": {"metadata.breach_scan": result["data"], "risk_score": 0.8}}
+        )
+        await create_timeline_event(
+            investigation_id, "enrichment_run",
+            f"Full breach scan: {request.query} — {len(result.get('data', {}))} sources",
+            metadata={"scan_type": "full_breach", "query": request.query, "sources": list(result.get("data", {}).keys())}
+        )
+
+    return {
+        "success": result.get("success", False),
+        "query": request.query,
+        "scan_type": "full_breach",
+        "sources_checked": ["LeakCheck", "HackCheck", "LeakOSINT", "BreachBase", "IntelVault", "BreachVIP"],
+        "sources_with_data": list(result.get("data", {}).keys()),
+        "breach_data": result.get("data", {}),
+        "error": result.get("error")
+    }
+
+
+@api_router.post("/investigations/{investigation_id}/scan/domain")
+async def scan_domain(
+    investigation_id: str,
+    request: ScanRequest,
+    x_api_key: Optional[str] = Header(None)
+):
+    """Run BOSINT domain intelligence scan"""
+    await validate_api_key(x_api_key)
+
+    bosint_result = await bosint_api_call("domain", request.query)
+
+    if request.save_results and request.entity_id and bosint_result.get("data"):
+        await db.entities.update_one(
+            {"id": request.entity_id},
+            {"$set": {"metadata.domain_intel": bosint_result["data"]}}
+        )
+        await create_timeline_event(
+            investigation_id, "enrichment_run",
+            f"Domain intelligence scan: {request.query}",
+            metadata={"scan_type": "bosint_domain", "query": request.query}
+        )
+
+    return {
+        "success": True,
+        "query": request.query,
+        "scan_type": "bosint_domain",
+        "domain_data": bosint_result.get("data"),
+        "error": bosint_result.get("error")
+    }
+
+
+@api_router.post("/investigations/{investigation_id}/scan/ip")
+async def scan_ip(
+    investigation_id: str,
+    request: ScanRequest,
+    x_api_key: Optional[str] = Header(None)
+):
+    """Run BOSINT IP intelligence scan"""
+    await validate_api_key(x_api_key)
+
+    bosint_result = await bosint_api_call("ip", request.query)
+
+    if request.save_results and request.entity_id and bosint_result.get("data"):
+        await db.entities.update_one(
+            {"id": request.entity_id},
+            {"$set": {"metadata.ip_intel": bosint_result["data"]}}
+        )
+
+    return {
+        "success": True,
+        "query": request.query,
+        "scan_type": "bosint_ip",
+        "ip_data": bosint_result.get("data"),
+        "error": bosint_result.get("error")
+    }
+
+
+@api_router.post("/investigations/{investigation_id}/scan/darkweb")
+async def scan_darkweb(
+    investigation_id: str,
+    request: ScanRequest,
+    x_api_key: Optional[str] = Header(None)
+):
+    """Run BOSINT dark web search"""
+    await validate_api_key(x_api_key)
+
+    bosint_result = await bosint_api_call("darkweb", request.query)
+    swatted_result = await swatted_breach_lookup(request.query, "username")
+
+    combined = {
+        "bosint_darkweb": bosint_result.get("data"),
+        "swatted": swatted_result.get("data"),
+    }
+
+    if request.save_results:
+        await create_timeline_event(
+            investigation_id, "enrichment_run",
+            f"Dark web scan: {request.query}",
+            metadata={"scan_type": "darkweb", "query": request.query}
+        )
+
+    return {
+        "success": True,
+        "query": request.query,
+        "scan_type": "darkweb",
+        "darkweb_data": combined,
+        "bosint_error": bosint_result.get("error"),
+        "swatted_error": swatted_result.get("error")
+    }
+
+
+@api_router.post("/investigations/{investigation_id}/scan/perplexity")
+async def scan_perplexity(
+    investigation_id: str,
+    request: ScanRequest,
+    x_api_key: Optional[str] = Header(None)
+):
+    """Run Perplexity AI deep web search for any entity"""
+    await validate_api_key(x_api_key)
+
+    result = await call_perplexity_search(
+        f'OSINT intelligence research on: "{request.query}". Find all publicly available information, social media presence, data breaches, domains, aliases, and associations. Be comprehensive and cite sources.'
+    )
+
+    # Extract entities from results
+    regex_entities = extract_entities_from_text(result, None)
+    entities_created = []
+
+    if request.save_results:
+        for rex_ent in regex_entities[:15]:
+            if rex_ent["value"] == request.query:
+                continue
+            saved = await save_entity_to_db(
+                investigation_id,
+                rex_ent["type"],
+                rex_ent["value"],
+                label=rex_ent.get("label", rex_ent["value"]),
+                confidence=rex_ent.get("confidence", 0.6),
+                risk_score=rex_ent.get("risk_score", 0.3),
+                sources=["perplexity_search"],
+                notes=f"Discovered via Perplexity search for: {request.query}"
+            )
+            entities_created.append(saved)
+
+        await create_timeline_event(
+            investigation_id, "enrichment_run",
+            f"Perplexity web search: {request.query[:50]}",
+            metadata={"scan_type": "perplexity", "entities_found": len(entities_created)}
+        )
+
+    return {
+        "success": True,
+        "query": request.query,
+        "scan_type": "perplexity_search",
+        "result": result,
+        "entities_extracted": len(entities_created),
+        "entities": [serialize_datetime(e) for e in entities_created]
+    }
+
+
+@api_router.post("/investigations/{investigation_id}/ai/chat")
+async def ai_chat_gemini(
+    investigation_id: str,
+    request: ChatRequest,
+    x_api_key: Optional[str] = Header(None)
+):
+    """AI Analyst chat powered by Gemini 1.5 Flash with full investigation context"""
+    await validate_api_key(x_api_key)
+
+    session_id = request.session_id or f"chat-{investigation_id}-{uuid.uuid4().hex[:8]}"
+
+    investigation = await db.investigations.find_one({"id": investigation_id}, {"_id": 0})
+    if not investigation:
+        raise HTTPException(status_code=404, detail="Investigation not found")
+
+    entities = await db.entities.find({"investigation_id": investigation_id}, {"_id": 0}).to_list(100)
+    relationships = await db.relationships.find({"investigation_id": investigation_id}, {"_id": 0}).to_list(50)
+    leads = await db.investigation_leads.find({"investigation_id": investigation_id}, {"_id": 0}).to_list(20)
+    evidence = await db.evidence.find({"investigation_id": investigation_id}, {"_id": 0}).to_list(20)
+    chat_history = await db.chat_messages.find(
+        {"investigation_id": investigation_id, "session_id": session_id}, {"_id": 0}
+    ).sort("timestamp", 1).to_list(20)
+
+    # Build entity map for relationship resolution
+    entity_map = {e["id"]: e for e in entities}
+    entities_by_type = {}
+    for e in entities:
+        et = e.get("entity_type", "unknown")
+        entities_by_type.setdefault(et, []).append(e.get("value", "")[:60])
+
+    context_parts = [
+        f"# Investigation: {investigation.get('name', 'Unknown')}",
+        f"Description: {investigation.get('description', 'N/A')}",
+        f"Status: {investigation.get('status', 'active')}",
+        f"\n## Scale: {len(entities)} entities | {len(relationships)} relationships | {len(leads)} leads | {len(evidence)} evidence items",
+    ]
+
+    if entities_by_type:
+        context_parts.append("\n## Entities by Type:")
+        for etype, vals in entities_by_type.items():
+            context_parts.append(f"  {etype.upper()}: {', '.join(vals[:8])}")
+
+    if relationships:
+        context_parts.append("\n## Key Relationships:")
+        for rel in relationships[:8]:
+            src = entity_map.get(rel.get("source_entity_id"), {})
+            tgt = entity_map.get(rel.get("target_entity_id"), {})
+            context_parts.append(f"  {src.get('value','?')[:25]} --[{rel.get('relationship_type','?')}]--> {tgt.get('value','?')[:25]}")
+
+    if leads:
+        context_parts.append("\n## Active Leads:")
+        for lead in leads[:6]:
+            context_parts.append(f"  [{lead.get('severity','?').upper()}] {lead.get('title','?')}: {lead.get('description','')[:120]}")
+
+    if evidence:
+        context_parts.append(f"\n## Evidence ({len(evidence)} items):")
+        for ev in evidence[:4]:
+            context_parts.append(f"  [{ev.get('evidence_type','?')}] {ev.get('content','')[:80]}")
+
+    investigation_context = "\n".join(context_parts)
+
+    system_prompt = f"""You are an expert OSINT investigation analyst with access to live case data. You act like a senior intelligence analyst — precise, methodical, and actionable.
+
+Your role:
+- Answer questions about entities, relationships, and patterns in this investigation
+- Identify connections, clusters, and suspicious behaviors
+- Suggest concrete next investigative steps
+- Assess risk and flag high-priority leads
+- Cross-reference entities to find hidden connections
+- Explain OSINT techniques and how to apply them to this case
+
+Always cite specific entity values and relationships when reasoning. Be direct and action-oriented.
+
+LIVE INVESTIGATION DATA:
+{investigation_context}"""
+
+    history_text = ""
+    if chat_history:
+        history_text = "\n\nPrevious conversation:\n"
+        for msg in chat_history[-8:]:
+            role = "Analyst" if msg.get("role") == "assistant" else "Investigator"
+            history_text += f"{role}: {msg.get('content', '')[:300]}\n"
+
+    full_prompt = f"{history_text}\n\nInvestigator: {request.message}\n\nAnalyst:"
+
+    try:
+        if GENAI_AVAILABLE and GEMINI_API_KEY:
+            response_text = await call_gemini_api(full_prompt, system_instruction=system_prompt)
+        elif EMERGENT_AVAILABLE and EMERGENT_LLM_KEY:
+            chat = LlmChat(
+                api_key=EMERGENT_LLM_KEY,
+                session_id=session_id,
+                system_message=system_prompt
+            ).with_model("gemini", "gemini-3-flash-preview")
+            response_text = await chat.send_message(UserMessage(text=request.message))
+        else:
+            response_text = "AI chat is not configured. Please add GEMINI_API_KEY to the backend .env file."
+
+        # Save messages
+        user_msg = ChatMessage(investigation_id=investigation_id, session_id=session_id, role="user", content=request.message)
+        assistant_msg = ChatMessage(investigation_id=investigation_id, session_id=session_id, role="assistant", content=response_text)
+        await db.chat_messages.insert_one(serialize_datetime(user_msg.model_dump()))
+        await db.chat_messages.insert_one(serialize_datetime(assistant_msg.model_dump()))
+
+        await create_timeline_event(investigation_id, "ai_chat", f"AI chat: {request.message[:60]}...")
+
+        return {
+            "success": True,
+            "session_id": session_id,
+            "message": response_text,
+            "model": "gemini-1.5-flash",
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+
+    except Exception as e:
+        logger.error(f"AI chat error: {e}")
+        raise HTTPException(status_code=500, detail=f"AI chat failed: {str(e)}")
+
+
+@api_router.get("/investigations/{investigation_id}/ai/status")
+async def get_ai_status(x_api_key: Optional[str] = Header(None)):
+    """Check which AI services are configured and available"""
+    await validate_api_key(x_api_key)
+    return {
+        "gemini": bool(GEMINI_API_KEY and GENAI_AVAILABLE),
+        "perplexity": bool(PERPLEXITY_API_KEY and OPENAI_AVAILABLE),
+        "bosint": bool(BOSINT_API_KEY),
+        "swatted": bool(SWATTED_API_KEY),
+        "openai": bool(os.environ.get("OPENAI_API_KEY")),
+        "models": {
+            "reasoning": "gemini-1.5-flash" if GEMINI_API_KEY else "none",
+            "web_search": "perplexity-sonar-pro" if PERPLEXITY_API_KEY else "none",
+            "osint": "bosint-3000-platforms" if BOSINT_API_KEY else "none",
+            "breach": "swatted-20k-daily" if SWATTED_API_KEY else "none"
+        }
+    }
+
 
 # Include the router in the main app
 app.include_router(api_router)

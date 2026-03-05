@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, FileBox, Users, Network, Clock, Sparkles, Search, Settings, Lightbulb, Brain } from 'lucide-react';
+import { ArrowLeft, FileBox, Users, Network, Clock, Sparkles, Search, Settings, Lightbulb, Brain, Zap } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
@@ -14,12 +14,13 @@ import TimelineWorkspace from '../components/workspace/TimelineWorkspace';
 import AISuggestionsWorkspace from '../components/workspace/AISuggestionsWorkspace';
 import LeadsWorkspace from '../components/workspace/LeadsWorkspace';
 import AIChatWorkspace from '../components/workspace/AIChatWorkspace';
+import AIInvestigateWorkspace from '../components/workspace/AIInvestigateWorkspace';
 
 const InvestigationWorkspace = () => {
   const { id } = useParams();
   const navigate = useNavigate();
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState('evidence'); // Evidence-first workflow
+  const [activeTab, setActiveTab] = useState('investigate'); // AI-first workflow
   const [globalSearch, setGlobalSearch] = useState('');
   
   const {
@@ -124,6 +125,30 @@ const InvestigationWorkspace = () => {
     }
   };
 
+  const refreshEntities = useCallback(async () => {
+    try {
+      const [entRes, relRes] = await Promise.all([
+        axios.get(`${API}/investigations/${id}/entities`),
+        axios.get(`${API}/investigations/${id}/relationships`),
+      ]);
+      const mappedEntities = entRes.data.map(e => ({
+        id: e.id, kind: e.entity_type, value: e.value,
+        label: e.label || e.value, notes: e.notes || '', tags: [],
+        sources: e.sources || [], confidence: e.confidence || 0.5,
+        risk: (e.risk_score || 0) * 100, createdAt: e.created_at,
+      }));
+      const mappedRelationships = relRes.data.map(r => ({
+        id: r.id, fromId: r.source_entity_id, toId: r.target_entity_id,
+        relType: r.relationship_type, label: r.label || r.relationship_type,
+        confidence: r.confidence || 0.5, sources: [], createdAt: r.created_at,
+      }));
+      setEntities(mappedEntities);
+      setRelationships(mappedRelationships);
+    } catch (e) {
+      console.error('Failed to refresh entities:', e);
+    }
+  }, [id]);
+
   if (loading) {
     return (
       <div className="h-screen bg-[#050505] flex items-center justify-center">
@@ -135,23 +160,15 @@ const InvestigationWorkspace = () => {
     );
   }
 
-  // Tab configuration with workflow order
+  // Tab configuration — AI Investigation is first
   const tabs = [
-    { 
-      id: 'evidence', 
-      label: 'Evidence', 
-      icon: FileBox,
-      count: evidence.length,
-      color: '#fbbf24',
-      description: 'Collect and document findings'
-    },
-    { 
-      id: 'entities', 
-      label: 'Entities', 
-      icon: Users,
-      count: entities.length,
-      color: '#14f195',
-      description: 'Identify subjects and objects'
+    {
+      id: 'investigate',
+      label: 'AI Engine',
+      icon: Zap,
+      count: null,
+      color: '#a855f7',
+      description: 'AI-driven investigation engine'
     },
     { 
       id: 'graph', 
@@ -159,7 +176,15 @@ const InvestigationWorkspace = () => {
       icon: Network,
       count: relationships.length,
       color: '#06b6d4',
-      description: 'Visualize connections'
+      description: 'Visualize entity connections'
+    },
+    { 
+      id: 'entities', 
+      label: 'Entities', 
+      icon: Users,
+      count: entities.length,
+      color: '#14f195',
+      description: 'All discovered entities'
     },
     { 
       id: 'leads', 
@@ -167,15 +192,7 @@ const InvestigationWorkspace = () => {
       icon: Lightbulb,
       count: null,
       color: '#f97316',
-      description: 'Auto-generated hypotheses'
-    },
-    { 
-      id: 'timeline', 
-      label: 'Timeline', 
-      icon: Clock,
-      count: timeline.length,
-      color: '#94a3b8',
-      description: 'Track investigation history'
+      description: 'Auto-generated investigation leads'
     },
     { 
       id: 'chat', 
@@ -183,15 +200,31 @@ const InvestigationWorkspace = () => {
       icon: Brain,
       count: null,
       color: '#14f195',
-      description: 'Interactive AI analyst'
+      description: 'AI analyst with case memory'
+    },
+    { 
+      id: 'evidence', 
+      label: 'Evidence', 
+      icon: FileBox,
+      count: evidence.length,
+      color: '#fbbf24',
+      description: 'Evidence and documents'
+    },
+    { 
+      id: 'timeline', 
+      label: 'Timeline', 
+      icon: Clock,
+      count: timeline.length,
+      color: '#94a3b8',
+      description: 'Investigation history'
     },
     { 
       id: 'ai', 
-      label: 'AI Gen', 
+      label: 'AI Suggest', 
       icon: Sparkles,
       count: null,
       color: '#7c3aed',
-      description: 'AI-powered suggestions'
+      description: 'AI batch suggestions'
     },
   ];
 
@@ -306,6 +339,12 @@ const InvestigationWorkspace = () => {
 
         {/* Content Area */}
         <main className="flex-1 overflow-hidden bg-[#0a0a0a]">
+          {activeTab === 'investigate' && (
+            <AIInvestigateWorkspace
+              investigationId={id}
+              onEntitiesUpdated={refreshEntities}
+            />
+          )}
           {activeTab === 'evidence' && (
             <EvidenceWorkspace 
               investigationId={id} 

@@ -67,7 +67,7 @@ const AIChatWorkspace = ({ investigationId, onNavigateToEvidence }) => {
     setMessages(prev => [...prev, userMessage]);
 
     try {
-      const response = await axios.post(`${API}/investigations/${investigationId}/chat`, {
+      const response = await axios.post(`${API}/investigations/${investigationId}/ai/chat`, {
         message,
         session_id: sessionId
       });
