@@ -1,5 +1,5 @@
 from fastapi import FastAPI, APIRouter, HTTPException, Header, UploadFile, File, Form
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
@@ -17,7 +17,24 @@ import re
 import collections
 import httpx
 import base64
+import socket
+import hashlib
 from io import BytesIO
+
+# Optional DNS imports
+try:
+    import dns.resolver
+    import dns.reversename
+    DNS_AVAILABLE = True
+except ImportError:
+    DNS_AVAILABLE = False
+
+# Optional WHOIS imports
+try:
+    import whois
+    WHOIS_AVAILABLE = True
+except ImportError:
+    WHOIS_AVAILABLE = False
 
 # Optional OCR/PDF imports
 try:
@@ -243,6 +260,27 @@ class RawTextIngestRequest(BaseModel):
     title: str = ""
     evidence_type: str = "raw_text"
     notes: str = ""
+
+# ============= OSINT TOOL REQUEST MODELS =============
+
+class DNSLookupRequest(BaseModel):
+    target: str  # domain or IP
+    record_types: List[str] = ["A", "MX", "NS", "TXT", "CNAME"]
+
+class IPGeoRequest(BaseModel):
+    ip: str
+
+class WHOISRequest(BaseModel):
+    domain: str
+
+class UsernameCheckRequest(BaseModel):
+    username: str
+
+class HashIdentifyRequest(BaseModel):
+    hash_value: str
+
+class ImportInvestigationRequest(BaseModel):
+    data: Dict[str, Any]
 
 # ============= EXPANDED EVIDENCE CATEGORIES =============
 
@@ -2518,6 +2556,393 @@ async def get_evidence_categories(x_api_key: Optional[str] = Header(None)):
     """Get all available evidence categories and types"""
     await validate_api_key(x_api_key)
     return EVIDENCE_CATEGORIES
+
+# ============= OSINT TOOLKIT ENDPOINTS =============
+
+@api_router.post("/tools/dns-lookup")
+async def dns_lookup(request: DNSLookupRequest, x_api_key: Optional[str] = Header(None)):
+    """Perform real DNS lookups for a domain or IP address"""
+    await validate_api_key(x_api_key)
+
+    target = request.target.strip().lower()
+    results: Dict[str, Any] = {"target": target, "records": {}, "errors": {}}
+
+    if not DNS_AVAILABLE:
+        raise HTTPException(status_code=503, detail="DNS lookup library not available")
+
+    # Validate if target is an IP address using the ipaddress module
+    import ipaddress
+    is_ip = False
+    try:
+        ipaddress.ip_address(target)
+        is_ip = True
+    except ValueError:
+        pass
+
+    if is_ip:
+        try:
+            rev = dns.reversename.from_address(target)
+            answer = dns.resolver.resolve(rev, "PTR", lifetime=5)
+            results["records"]["PTR"] = [str(r) for r in answer]
+        except Exception as e:
+            results["errors"]["PTR"] = str(e)
+        return results
+
+    requested_types = [t.upper() for t in request.record_types]
+    for rtype in requested_types:
+        try:
+            answer = dns.resolver.resolve(target, rtype, lifetime=5)
+            if rtype == "MX":
+                results["records"][rtype] = [
+                    {"preference": r.preference, "exchange": str(r.exchange)} for r in answer
+                ]
+            elif rtype == "SOA":
+                r = answer[0]
+                results["records"][rtype] = {
+                    "mname": str(r.mname),
+                    "rname": str(r.rname),
+                    "serial": r.serial,
+                }
+            else:
+                results["records"][rtype] = [str(r) for r in answer]
+        except dns.resolver.NXDOMAIN:
+            results["errors"][rtype] = "Domain does not exist"
+        except dns.resolver.NoAnswer:
+            results["errors"][rtype] = "No records found"
+        except Exception as e:
+            results["errors"][rtype] = str(e)
+
+    return results
+
+
+@api_router.post("/tools/ip-geo")
+async def ip_geolocation(request: IPGeoRequest, x_api_key: Optional[str] = Header(None)):
+    """Get real IP geolocation data using ip-api.com (free, no key required)"""
+    await validate_api_key(x_api_key)
+
+    ip = request.ip.strip()
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                f"http://ip-api.com/json/{ip}",
+                params={"fields": "status,message,country,countryCode,region,regionName,city,zip,lat,lon,timezone,isp,org,as,asname,reverse,mobile,proxy,hosting,query"},
+            )
+            data = resp.json()
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Geolocation lookup failed: {str(e)}")
+
+    if data.get("status") == "fail":
+        raise HTTPException(status_code=400, detail=data.get("message", "Lookup failed"))
+
+    # Enrich with additional flags
+    data["is_vpn_or_proxy"] = data.get("proxy", False)
+    data["is_hosting"] = data.get("hosting", False)
+    data["is_mobile"] = data.get("mobile", False)
+
+    return data
+
+
+@api_router.post("/tools/whois")
+async def whois_lookup(request: WHOISRequest, x_api_key: Optional[str] = Header(None)):
+    """Perform a WHOIS lookup for a domain"""
+    await validate_api_key(x_api_key)
+
+    if not WHOIS_AVAILABLE:
+        raise HTTPException(status_code=503, detail="WHOIS library not available")
+
+    domain = request.domain.strip().lower()
+    try:
+        import asyncio
+        loop = asyncio.get_event_loop()
+        w = await loop.run_in_executor(None, whois.whois, domain)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"WHOIS lookup failed: {str(e)}")
+
+    def _serialize(obj: Any) -> Any:
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        if isinstance(obj, list):
+            return [_serialize(i) for i in obj]
+        if isinstance(obj, dict):
+            return {k: _serialize(v) for k, v in obj.items()}
+        return obj
+
+    raw = dict(w) if w else {}
+    serialized = {k: _serialize(v) for k, v in raw.items()}
+
+    # Surface key fields at top level for convenience
+    result = {
+        "domain": domain,
+        "registrar": serialized.get("registrar"),
+        "creation_date": serialized.get("creation_date"),
+        "expiration_date": serialized.get("expiration_date"),
+        "updated_date": serialized.get("updated_date"),
+        "name_servers": serialized.get("name_servers"),
+        "status": serialized.get("status"),
+        "emails": serialized.get("emails"),
+        "dnssec": serialized.get("dnssec"),
+        "org": serialized.get("org"),
+        "country": serialized.get("country"),
+        "privacy_protected": any(
+            p in text
+            for text in [
+                str(serialized.get("registrant_name") or "").lower(),
+                str(serialized.get("registrant_organization") or "").lower(),
+                str(serialized.get("admin_name") or "").lower(),
+                str(serialized.get("org") or "").lower(),
+                str(serialized.get("emails") or "").lower(),
+            ]
+            for p in ["privacy", "redacted", "protected", "guard", "whoisguard"]
+        ),
+        "raw": serialized,
+    }
+
+    return result
+
+
+@api_router.post("/tools/username-check")
+async def username_check(request: UsernameCheckRequest, x_api_key: Optional[str] = Header(None)):
+    """Check if a username exists on major social platforms"""
+    await validate_api_key(x_api_key)
+
+    username = request.username.strip()
+    if not username or len(username) > 50:
+        raise HTTPException(status_code=400, detail="Invalid username")
+
+    # Platforms with simple profile URL patterns
+    platforms = [
+        {"name": "GitHub", "url": f"https://github.com/{username}", "category": "developer"},
+        {"name": "Twitter / X", "url": f"https://twitter.com/{username}", "category": "social"},
+        {"name": "Reddit", "url": f"https://www.reddit.com/user/{username}", "category": "social"},
+        {"name": "Instagram", "url": f"https://www.instagram.com/{username}/", "category": "social"},
+        {"name": "TikTok", "url": f"https://www.tiktok.com/@{username}", "category": "social"},
+        {"name": "YouTube", "url": f"https://www.youtube.com/@{username}", "category": "social"},
+        {"name": "Twitch", "url": f"https://www.twitch.tv/{username}", "category": "gaming"},
+        {"name": "Pinterest", "url": f"https://www.pinterest.com/{username}/", "category": "social"},
+        {"name": "Telegram", "url": f"https://t.me/{username}", "category": "messaging"},
+        {"name": "Medium", "url": f"https://medium.com/@{username}", "category": "blogging"},
+        {"name": "HackerNews", "url": f"https://news.ycombinator.com/user?id={username}", "category": "developer"},
+        {"name": "GitLab", "url": f"https://gitlab.com/{username}", "category": "developer"},
+        {"name": "Steam", "url": f"https://steamcommunity.com/id/{username}", "category": "gaming"},
+        {"name": "Keybase", "url": f"https://keybase.io/{username}", "category": "security"},
+        {"name": "Pastebin", "url": f"https://pastebin.com/u/{username}", "category": "developer"},
+    ]
+
+    # Status codes that indicate a profile exists
+    EXIST_CODES = {200, 301, 302}
+
+    results = []
+    async with httpx.AsyncClient(
+        timeout=8,
+        follow_redirects=False,
+        headers={"User-Agent": "Mozilla/5.0 (compatible; OSINT-Toolkit/1.0)"},
+    ) as client:
+        async def check_platform(p: Dict[str, Any]) -> Dict[str, Any]:
+            try:
+                resp = await client.head(p["url"])
+                status = resp.status_code
+                exists = status in EXIST_CODES
+                return {**p, "status": status, "exists": exists, "profile_url": p["url"]}
+            except Exception as exc:
+                return {**p, "status": None, "exists": False, "error": str(exc), "profile_url": p["url"]}
+
+        import asyncio
+        tasks = [check_platform(p) for p in platforms]
+        results = await asyncio.gather(*tasks)
+
+    found = [r for r in results if r.get("exists")]
+    not_found = [r for r in results if not r.get("exists")]
+
+    return {
+        "username": username,
+        "total_checked": len(results),
+        "found_count": len(found),
+        "found": found,
+        "not_found": not_found,
+    }
+
+
+@api_router.post("/tools/hash-identify")
+async def hash_identify(request: HashIdentifyRequest, x_api_key: Optional[str] = Header(None)):
+    """Identify the hash type and provide analysis"""
+    await validate_api_key(x_api_key)
+
+    h = request.hash_value.strip().lower()
+    if not re.match(r'^[0-9a-f]+$', h):
+        raise HTTPException(status_code=400, detail="Value does not appear to be a hex hash")
+
+    length = len(h)
+
+    HASH_SIGNATURES: Dict[int, List[str]] = {
+        8: ["CRC32"],
+        16: ["MD5 (half)", "CRC64"],
+        32: ["MD5", "NTLM", "LM"],
+        40: ["SHA-1", "MySQL4/5", "Haval-160", "RIPEMD-160"],
+        48: ["Tiger-192", "MD2"],
+        56: ["SHA-224", "Haval-224"],
+        64: ["SHA-256", "BLAKE2s", "Keccak-256"],
+        80: ["RIPEMD-320", "SHA-384 (truncated)"],
+        96: ["SHA-384", "Haval-384"],
+        128: ["SHA-512", "Whirlpool", "BLAKE2b", "Keccak-512"],
+    }
+
+    candidates = HASH_SIGNATURES.get(length, [])
+    primary = candidates[0] if candidates else f"Unknown ({length}-char hex)"
+
+    # Check common OSINT databases indicator
+    threat_intel_note = None
+    if length == 32:
+        threat_intel_note = "MD5 hashes can be looked up in databases such as VirusTotal, HashMyFiles, or NSRL"
+    elif length == 40:
+        threat_intel_note = "SHA-1 hashes can be checked against HaveIBeenPwned (passwords) and VirusTotal (files)"
+    elif length == 64:
+        threat_intel_note = "SHA-256 hashes are commonly used for file verification and can be searched on VirusTotal"
+
+    return {
+        "hash": h,
+        "length": length,
+        "primary_type": primary,
+        "possible_types": candidates,
+        "threat_intel_note": threat_intel_note,
+        "lookup_urls": {
+            "virustotal": f"https://www.virustotal.com/gui/search/{h}",
+            "hybrid_analysis": f"https://hybrid-analysis.com/search?query={h}",
+            "otx": f"https://otx.alienvault.com/indicator/file/{h}",
+        },
+    }
+
+
+@api_router.get("/investigations/{investigation_id}/export")
+async def export_investigation(investigation_id: str, x_api_key: Optional[str] = Header(None)):
+    """Export full investigation data as a JSON bundle"""
+    await validate_api_key(x_api_key)
+
+    inv_doc = await db.investigations.find_one({"id": investigation_id}, {"_id": 0})
+    if not inv_doc:
+        raise HTTPException(status_code=404, detail="Investigation not found")
+
+    entities_cursor = db.entities.find({"investigation_id": investigation_id}, {"_id": 0})
+    entities = await entities_cursor.to_list(length=None)
+
+    rels_cursor = db.relationships.find({"investigation_id": investigation_id}, {"_id": 0})
+    relationships = await rels_cursor.to_list(length=None)
+
+    ev_cursor = db.evidence.find({"investigation_id": investigation_id}, {"_id": 0})
+    evidence = await ev_cursor.to_list(length=None)
+
+    timeline_cursor = db.timeline_events.find(
+        {"investigation_id": investigation_id}, {"_id": 0}
+    ).sort("timestamp", -1)
+    timeline = await timeline_cursor.to_list(length=None)
+
+    leads_cursor = db.investigation_leads.find({"investigation_id": investigation_id}, {"_id": 0})
+    leads = await leads_cursor.to_list(length=None)
+
+    export_bundle = {
+        "export_version": "1.0",
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "investigation": serialize_datetime(inv_doc),
+        "entities": [serialize_datetime(e) for e in entities],
+        "relationships": [serialize_datetime(r) for r in relationships],
+        "evidence": [serialize_datetime(e) for e in evidence],
+        "timeline": [serialize_datetime(t) for t in timeline],
+        "leads": [serialize_datetime(l) for l in leads],
+        "stats": {
+            "entity_count": len(entities),
+            "relationship_count": len(relationships),
+            "evidence_count": len(evidence),
+            "timeline_count": len(timeline),
+            "lead_count": len(leads),
+        },
+    }
+
+    filename = f"investigation_{inv_doc.get('case_id', investigation_id)}.json"
+    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+    return JSONResponse(content=export_bundle, headers=headers)
+
+
+@api_router.post("/investigations/import")
+async def import_investigation(
+    request: ImportInvestigationRequest,
+    x_api_key: Optional[str] = Header(None)
+):
+    """Import an investigation from a previously exported JSON bundle"""
+    await validate_api_key(x_api_key)
+
+    data = request.data
+    if "investigation" not in data:
+        raise HTTPException(status_code=400, detail="Invalid export bundle: missing 'investigation' key")
+
+    # Create a new investigation with a fresh ID to avoid collisions
+    old_inv = data["investigation"]
+    new_inv_id = str(uuid.uuid4())
+    new_case_id = f"CASE-{uuid.uuid4().hex[:8].upper()}"
+
+    new_inv = {
+        **old_inv,
+        "id": new_inv_id,
+        "case_id": new_case_id,
+        "name": f"{old_inv.get('name', 'Imported')} (imported)",
+        "status": "active",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.investigations.insert_one({**new_inv, "_id": str(uuid.uuid4())})
+
+    # Build an entity ID mapping (old → new)
+    entity_id_map: Dict[str, str] = {}
+    for ent in data.get("entities", []):
+        old_id = ent.get("id")
+        new_id = str(uuid.uuid4())
+        entity_id_map[old_id] = new_id
+        new_ent = {
+            **ent,
+            "_id": str(uuid.uuid4()),
+            "id": new_id,
+            "investigation_id": new_inv_id,
+        }
+        await db.entities.insert_one(new_ent)
+
+    for rel in data.get("relationships", []):
+        new_rel = {
+            **rel,
+            "_id": str(uuid.uuid4()),
+            "id": str(uuid.uuid4()),
+            "investigation_id": new_inv_id,
+            "source_entity_id": entity_id_map.get(rel.get("source_entity_id", ""), rel.get("source_entity_id", "")),
+            "target_entity_id": entity_id_map.get(rel.get("target_entity_id", ""), rel.get("target_entity_id", "")),
+        }
+        await db.relationships.insert_one(new_rel)
+
+    for ev in data.get("evidence", []):
+        old_eid = ev.get("entity_id")
+        new_eid = entity_id_map.get(old_eid, old_eid) if old_eid else None
+        new_ev = {
+            **ev,
+            "_id": str(uuid.uuid4()),
+            "id": str(uuid.uuid4()),
+            "investigation_id": new_inv_id,
+            "entity_id": new_eid,
+        }
+        await db.evidence.insert_one(new_ev)
+
+    await create_timeline_event(
+        new_inv_id,
+        "investigation_imported",
+        f"Investigation imported from bundle (original: {old_inv.get('case_id', 'unknown')})",
+        metadata={"original_case_id": old_inv.get("case_id"), "export_version": data.get("export_version", "unknown")},
+    )
+
+    return {
+        "success": True,
+        "new_investigation_id": new_inv_id,
+        "new_case_id": new_case_id,
+        "imported_counts": {
+            "entities": len(data.get("entities", [])),
+            "relationships": len(data.get("relationships", [])),
+            "evidence": len(data.get("evidence", [])),
+        },
+    }
 
 # Include the router in the main app
 app.include_router(api_router)
