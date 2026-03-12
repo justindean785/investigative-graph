@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { Users, Plus, Link2, Trash2, ChevronRight, Search, ArrowRight, Network } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -65,11 +65,11 @@ const EntitiesWorkspace = ({ investigationId, onNavigateToGraph, onNavigateToEvi
     return relationships.filter(r => r.fromId === entityId || r.toId === entityId);
   };
 
-  const filteredEntities = entities.filter(entity =>
+  const filteredEntities = useMemo(() => entities.filter(entity =>
     entity.value.toLowerCase().includes(searchQuery.toLowerCase()) ||
     (entity.label && entity.label.toLowerCase().includes(searchQuery.toLowerCase())) ||
     entity.kind.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  ), [entities, searchQuery]);
 
   const handleAddEntity = async () => {
     if (!newEntity.value.trim()) {
