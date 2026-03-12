@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, FileBox, Users, Network, Clock, Sparkles, Search, Settings, Lightbulb, Brain } from 'lucide-react';
+import { ArrowLeft, FileBox, Users, Network, Clock, Sparkles, Search, Settings, Lightbulb, Brain, Wrench } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
@@ -14,6 +14,7 @@ import TimelineWorkspace from '../components/workspace/TimelineWorkspace';
 import AISuggestionsWorkspace from '../components/workspace/AISuggestionsWorkspace';
 import LeadsWorkspace from '../components/workspace/LeadsWorkspace';
 import AIChatWorkspace from '../components/workspace/AIChatWorkspace';
+import OsintToolkitWorkspace from '../components/workspace/OsintToolkitWorkspace';
 
 const InvestigationWorkspace = () => {
   const { id } = useParams();
@@ -193,6 +194,14 @@ const InvestigationWorkspace = () => {
       color: '#7c3aed',
       description: 'AI-powered suggestions'
     },
+    {
+      id: 'toolkit',
+      label: 'Toolkit',
+      icon: Wrench,
+      count: null,
+      color: '#06b6d4',
+      description: 'OSINT tools: DNS, WHOIS, IP geo, username search, hash analysis'
+    },
   ];
 
   const navigateToTab = (tabId) => setActiveTab(tabId);
@@ -346,6 +355,12 @@ const InvestigationWorkspace = () => {
           )}
           {activeTab === 'ai' && (
             <AISuggestionsWorkspace 
+              investigationId={id}
+              onNavigateToEvidence={() => navigateToTab('evidence')}
+            />
+          )}
+          {activeTab === 'toolkit' && (
+            <OsintToolkitWorkspace
               investigationId={id}
               onNavigateToEvidence={() => navigateToTab('evidence')}
             />
