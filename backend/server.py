@@ -2,6 +2,7 @@ from fastapi import FastAPI, APIRouter, HTTPException, Header, UploadFile, File,
 from fastapi.responses import StreamingResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
+from starlette.middleware.gzip import GZipMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
@@ -371,103 +372,103 @@ MOCK_OSINT_DATA = {
 
 ENTITY_PATTERNS = {
     "email": {
-        "pattern": r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}',
+        "compiled": re.compile(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}', re.IGNORECASE),
         "label": "Email Address",
         "entity_type": "email",
         "risk_base": 0.3
     },
     "domain": {
-        "pattern": r'(?<![/@])(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+(?:onion|com|net|org|io|co|info|biz|gov|edu|mil|int|xyz|online|site|tech|dev|app|cloud|ru|cn|uk|de|fr|jp|br|in|au|nl|se|ch|es|it|pl|cz|ro|hu|bg|ua|kz|by)',
+        "compiled": re.compile(r'(?<![/@])(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+(?:onion|com|net|org|io|co|info|biz|gov|edu|mil|int|xyz|online|site|tech|dev|app|cloud|ru|cn|uk|de|fr|jp|br|in|au|nl|se|ch|es|it|pl|cz|ro|hu|bg|ua|kz|by)', re.IGNORECASE),
         "label": "Domain",
         "entity_type": "domain",
         "risk_base": 0.4
     },
     "onion_domain": {
-        "pattern": r'[a-z2-7]{16,56}\.onion',
+        "compiled": re.compile(r'[a-z2-7]{16,56}\.onion', re.IGNORECASE),
         "label": "Tor Hidden Service",
         "entity_type": "domain",
         "risk_base": 0.8
     },
     "ip_v4": {
-        "pattern": r'\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b',
+        "compiled": re.compile(r'\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b', re.IGNORECASE),
         "label": "IPv4 Address",
         "entity_type": "ip",
         "risk_base": 0.3
     },
     "ip_v6": {
-        "pattern": r'(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|(?:[0-9a-fA-F]{1,4}:){1,7}:|(?:[0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}',
+        "compiled": re.compile(r'(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|(?:[0-9a-fA-F]{1,4}:){1,7}:|(?:[0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}', re.IGNORECASE),
         "label": "IPv6 Address",
         "entity_type": "ip",
         "risk_base": 0.3
     },
     "wallet_eth": {
-        "pattern": r'0x[a-fA-F0-9]{40}',
+        "compiled": re.compile(r'0x[a-fA-F0-9]{40}', re.IGNORECASE),
         "label": "Ethereum Wallet",
         "entity_type": "wallet",
         "risk_base": 0.5
     },
     "wallet_btc": {
-        "pattern": r'(?:bc1|[13])[a-zA-HJ-NP-Z0-9]{25,39}',
+        "compiled": re.compile(r'(?:bc1|[13])[a-zA-HJ-NP-Z0-9]{25,39}', re.IGNORECASE),
         "label": "Bitcoin Wallet",
         "entity_type": "wallet",
         "risk_base": 0.5
     },
     "wallet_monero": {
-        "pattern": r'4[0-9AB][1-9A-HJ-NP-Za-km-z]{93}',
+        "compiled": re.compile(r'4[0-9AB][1-9A-HJ-NP-Za-km-z]{93}', re.IGNORECASE),
         "label": "Monero Wallet",
         "entity_type": "wallet",
         "risk_base": 0.7
     },
     "phone_intl": {
-        "pattern": r'\+[1-9]\d{1,14}',
+        "compiled": re.compile(r'\+[1-9]\d{1,14}', re.IGNORECASE),
         "label": "International Phone",
         "entity_type": "phone",
         "risk_base": 0.2
     },
     "phone_us": {
-        "pattern": r'(?:\+1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}',
+        "compiled": re.compile(r'(?:\+1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}', re.IGNORECASE),
         "label": "US Phone Number",
         "entity_type": "phone",
         "risk_base": 0.2
     },
     "username_twitter": {
-        "pattern": r'(?:twitter\.com/|@)([A-Za-z0-9_]{1,15})',
+        "compiled": re.compile(r'(?:twitter\.com/|@)([A-Za-z0-9_]{1,15})', re.IGNORECASE),
         "label": "Twitter Handle",
         "entity_type": "username",
         "risk_base": 0.1
     },
     "username_telegram": {
-        "pattern": r'(?:t\.me/|@)([A-Za-z0-9_]{5,32})',
+        "compiled": re.compile(r'(?:t\.me/|@)([A-Za-z0-9_]{5,32})', re.IGNORECASE),
         "label": "Telegram Handle",
         "entity_type": "username",
         "risk_base": 0.2
     },
     "username_generic": {
-        "pattern": r'@[A-Za-z0-9_]{3,30}',
+        "compiled": re.compile(r'@[A-Za-z0-9_]{3,30}', re.IGNORECASE),
         "label": "Username/Handle",
         "entity_type": "username",
         "risk_base": 0.1
     },
     "url": {
-        "pattern": r'https?://[^\s<>"\'{}|\\^`\[\]]+',
+        "compiled": re.compile(r'https?://[^\s<>"\'{}|\\^`\[\]]+', re.IGNORECASE),
         "label": "URL",
         "entity_type": "url",
         "risk_base": 0.2
     },
     "social_profile": {
-        "pattern": r'(?:facebook\.com|instagram\.com|linkedin\.com|github\.com|reddit\.com)/[A-Za-z0-9._-]+',
+        "compiled": re.compile(r'(?:facebook\.com|instagram\.com|linkedin\.com|github\.com|reddit\.com)/[A-Za-z0-9._-]+', re.IGNORECASE),
         "label": "Social Profile URL",
         "entity_type": "social",
         "risk_base": 0.1
     },
     "hash_md5": {
-        "pattern": r'\b[a-fA-F0-9]{32}\b',
+        "compiled": re.compile(r'\b[a-fA-F0-9]{32}\b', re.IGNORECASE),
         "label": "MD5 Hash",
         "entity_type": "hash",
         "risk_base": 0.3
     },
     "hash_sha256": {
-        "pattern": r'\b[a-fA-F0-9]{64}\b',
+        "compiled": re.compile(r'\b[a-fA-F0-9]{64}\b', re.IGNORECASE),
         "label": "SHA256 Hash",
         "entity_type": "hash",
         "risk_base": 0.3
@@ -568,7 +569,7 @@ def extract_entities_from_text(text: str, source_evidence_id: Optional[str] = No
     
     for pattern_name, config in ENTITY_PATTERNS.items():
         try:
-            matches = re.findall(config["pattern"], text, re.IGNORECASE)
+            matches = config["compiled"].findall(text)
             
             for match in matches:
                 # Handle tuple matches from groups
@@ -849,22 +850,22 @@ def analyze_graph_intelligence(entities: List[Dict], relationships: List[Dict]) 
                 "importance": "high" if degree >= 3 else "medium"
             })
     
-    # Detect clusters using simple connected components
+    # Detect clusters using iterative BFS (avoids stack overflow on large graphs)
     visited = set()
     clusters = []
-    
-    def dfs(node, cluster):
-        if node in visited:
-            return
-        visited.add(node)
-        cluster.append(node)
-        for neighbor in adjacency.get(node, []):
-            dfs(neighbor, cluster)
     
     for entity_id in adjacency:
         if entity_id not in visited:
             cluster = []
-            dfs(entity_id, cluster)
+            queue = [entity_id]
+            visited.add(entity_id)
+            while queue:
+                node = queue.pop(0)
+                cluster.append(node)
+                for neighbor in adjacency.get(node, []):
+                    if neighbor not in visited:
+                        visited.add(neighbor)
+                        queue.append(neighbor)
             if len(cluster) > 1:  # Only report clusters with multiple nodes
                 cluster_entities = [entity_map[eid] for eid in cluster if eid in entity_map]
                 clusters.append({
@@ -999,17 +1000,22 @@ def generate_investigation_leads(entities: List[Dict], relationships: List[Dict]
     domains = entities_by_type.get("domain", [])
     
     if emails and domains:
+        # Pre-build email-by-domain lookup for O(1) access instead of O(emails × domains)
+        emails_by_domain = defaultdict(list)
+        for email in emails:
+            email_value = email.get("value", "")
+            if "@" in email_value:
+                email_domain = email_value.split("@")[1].lower()
+                emails_by_domain[email_domain].append(email)
+        
         for domain in domains:
             domain_value = domain.get("value", "")
-            connected_emails = []
-            
+            # Get emails matching by domain name (O(1) lookup)
+            connected_emails = list(emails_by_domain.get(domain_value.lower(), []))
+            # Also check emails connected via relationship
+            connected_ids = {e["id"] for e in connected_emails}
             for email in emails:
-                email_value = email.get("value", "")
-                # Check if email domain matches
-                if "@" in email_value and email_value.split("@")[1].lower() == domain_value.lower():
-                    connected_emails.append(email)
-                # Check if connected via relationship
-                elif email["id"] in adjacency.get(domain["id"], []):
+                if email["id"] not in connected_ids and email["id"] in adjacency.get(domain["id"], []):
                     connected_emails.append(email)
             
             if len(connected_emails) >= 2:
@@ -2155,9 +2161,10 @@ async def chat_with_ai(
         
         if relationships:
             context_parts.append(f"\n## Relationships: {len(relationships)} connections discovered")
+            entity_lookup = {e['id']: e for e in entities}
             for rel in relationships[:5]:
-                source = next((e for e in entities if e['id'] == rel.get('source_entity_id')), {})
-                target = next((e for e in entities if e['id'] == rel.get('target_entity_id')), {})
+                source = entity_lookup.get(rel.get('source_entity_id'), {})
+                target = entity_lookup.get(rel.get('target_entity_id'), {})
                 context_parts.append(f"- {source.get('value', '?')[:20]} → {rel.get('relationship_type', '?')} → {target.get('value', '?')[:20]}")
         
         if leads:
@@ -2521,6 +2528,26 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+@app.on_event("startup")
+async def create_indexes():
+    """Create MongoDB indexes for frequently-queried fields"""
+    await db.investigations.create_index("id", unique=True)
+    await db.entities.create_index("investigation_id")
+    await db.entities.create_index([("id", 1), ("investigation_id", 1)])
+    await db.relationships.create_index("investigation_id")
+    await db.relationships.create_index([("id", 1), ("investigation_id", 1)])
+    await db.timeline_events.create_index("investigation_id")
+    await db.timeline_events.create_index([("investigation_id", 1), ("timestamp", -1)])
+    await db.evidence.create_index("investigation_id")
+    await db.evidence.create_index([("id", 1), ("investigation_id", 1)])
+    await db.ai_suggestions.create_index([("investigation_id", 1), ("status", 1)])
+    await db.investigation_leads.create_index("investigation_id")
+    await db.investigation_leads.create_index([("id", 1), ("investigation_id", 1)])
+    await db.chat_messages.create_index([("investigation_id", 1), ("session_id", 1)])
+    logger.info("MongoDB indexes created")
 
 @app.on_event("shutdown")
 async def shutdown_db_client():

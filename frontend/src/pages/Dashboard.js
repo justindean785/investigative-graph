@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Plus, Search, FolderOpen, Clock, Settings } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -54,10 +54,10 @@ const Dashboard = () => {
     }
   };
 
-  const filteredInvestigations = investigations.filter(inv =>
+  const filteredInvestigations = useMemo(() => investigations.filter(inv =>
     inv.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
     inv.description.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  ), [investigations, searchQuery]);
 
   const formatDate = (dateString) => {
     const date = new Date(dateString);
