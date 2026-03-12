@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from emergentintegrations.llm.chat import LlmChat, UserMessage
 import json
 import re
+import collections
 import httpx
 import base64
 from io import BytesIO
@@ -857,10 +858,10 @@ def analyze_graph_intelligence(entities: List[Dict], relationships: List[Dict]) 
     for entity_id in adjacency:
         if entity_id not in visited:
             cluster = []
-            queue = [entity_id]
+            queue = collections.deque([entity_id])
             visited.add(entity_id)
             while queue:
-                node = queue.pop(0)
+                node = queue.popleft()
                 cluster.append(node)
                 for neighbor in adjacency.get(node, []):
                     if neighbor not in visited:
