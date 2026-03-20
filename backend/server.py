@@ -56,35 +56,18 @@ GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY') or os.environ.get('EMERGENT_LL
 _gemini_client = google_genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 # ============= OSINT API CREDENTIALS =============
-# BOSINT: key embedded in URL path — https://app.bosint.gg/bosintapi/{key}/{command}/{query}
+# GHOSINT — primary OSINT search engine (no Cloudflare issues)
+GHOSINT_API_KEY = os.environ.get('GHOSINT_API_KEY', '')
+GHOSINT_API_BASE = 'https://api.ghosint.io'
+
+# BOSINT / SWATTED — stored for future use once CF allowlisting is resolved
 BOSINT_API_KEY = os.environ.get('BOSINT_API_KEY', '')
 BOSINT_API_BASE = 'https://app.bosint.gg/bosintapi'
-# BOSINT Cloudflare clearance cookie (copy from browser DevTools → Application → Cookies)
-BOSINT_CF_CLEARANCE = os.environ.get('BOSINT_CF_CLEARANCE', '')
-
-# SWATTED: session-based — exchange account token for sessionToken/userID/csrfToken
 SWATTED_ACCOUNT_KEY = os.environ.get('SWATTED_API_KEY', '')
 SWATTED_API_BASE = 'https://swattedw.tf/api'
-# Pre-exchanged session credentials (run swatted_login() once from browser then paste here)
 SWATTED_SESSION_TOKEN = os.environ.get('SWATTED_SESSION_TOKEN', '')
 SWATTED_USER_ID = os.environ.get('SWATTED_USER_ID', '')
 SWATTED_CSRF_TOKEN = os.environ.get('SWATTED_CSRF_TOKEN', '')
-# Cloudflare clearance cookie for swattedw.tf (copy from browser DevTools)
-SWATTED_CF_CLEARANCE = os.environ.get('SWATTED_CF_CLEARANCE', '')
-
-# Shared browser-like headers that help pass Cloudflare on API endpoints
-_CF_HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-    'Accept': 'application/json, text/plain, */*',
-    'Accept-Language': 'en-US,en;q=0.9',
-    'Accept-Encoding': 'gzip, deflate, br',
-    'sec-ch-ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
-    'sec-ch-ua-mobile': '?0',
-    'sec-ch-ua-platform': '"Windows"',
-    'sec-fetch-dest': 'empty',
-    'sec-fetch-mode': 'cors',
-    'sec-fetch-site': 'same-origin',
-}
 
 # Create the main app without a prefix
 app = FastAPI()
@@ -1422,90 +1405,64 @@ def serialize_datetime(obj):
 
 # ============= OSINT API HELPERS =============
 
-def _bosint_headers() -> Dict[str, str]:
-    """Build headers for BOSINT requests, including cf_clearance cookie if configured."""
-    headers = dict(_CF_HEADERS)
-    headers['Origin'] = 'https://app.bosint.gg'
-    headers['Referer'] = 'https://app.bosint.gg/'
-    if BOSINT_CF_CLEARANCE:
-        headers['Cookie'] = f'cf_clearance={BOSINT_CF_CLEARANCE}'
-    return headers
+# GHOSINT service lists per query type.
+# Free (0.00 credits): leakcheck, snusbase, breachvip
+# Paid (0.05 credits each): ghosint.search, leakosint, seon — require account credits
+_GHOSINT_FREE = ["leakcheck", "snusbase", "breachvip"]
+_GHOSINT_PAID = ["ghosint.search", "leakosint", "seon"]
+
+_GHOSINT_SERVICES: Dict[str, List[str]] = {
+    # Free services first; paid added where supported once account has credits
+    "email":    ["leakcheck", "snusbase", "breachvip"],   # + ghosint.search, leakosint, seon (paid)
+    "phone":    ["leakcheck", "snusbase", "breachvip"],   # + ghosint.search, leakosint, seon (paid)
+    "username": ["leakcheck", "snusbase", "breachvip"],   # + ghosint.search, leakosint (paid)
+    "domain":   ["snusbase", "breachvip"],                # + ghosint.search, leakosint (paid)
+    "ip":       ["snusbase", "breachvip"],                # + ghosint.search, leakosint (paid)
+    "url":      ["ghosint.search", "leakosint"],          # paid only — no free equivalent
+    "wallet":   ["ghosint.search"],                       # paid only
+    "hash":     ["snusbase"],                             # free
+}
+
+# Risk heuristic per source
+_GHOSINT_RISK: Dict[str, float] = {
+    "ghosint.search": 0.6,
+    "leakosint": 0.65,
+    "leakcheck": 0.7,
+    "snusbase": 0.65,
+    "breachvip": 0.65,
+    "seon": 0.5,
+}
 
 
-def _swatted_headers(with_csrf: bool = False) -> Dict[str, str]:
-    """Build headers for Swatted requests, including session auth and optional CSRF."""
-    headers = dict(_CF_HEADERS)
-    headers['Origin'] = 'https://swattedw.tf'
-    headers['Referer'] = 'https://swattedw.tf/'
-    if SWATTED_SESSION_TOKEN:
-        headers['Authorization'] = f'Bearer {SWATTED_SESSION_TOKEN}'
-    if SWATTED_USER_ID:
-        headers['X-User-ID'] = SWATTED_USER_ID
-    if with_csrf and SWATTED_CSRF_TOKEN:
-        headers['X-CSRF-Token'] = SWATTED_CSRF_TOKEN
-    if SWATTED_CF_CLEARANCE:
-        headers['Cookie'] = f'cf_clearance={SWATTED_CF_CLEARANCE}'
-    return headers
-
-
-async def bosint_lookup(command: str, query: str) -> Optional[Dict]:
-    """Call BOSINT API: GET /bosintapi/{key}/{command}/{query}"""
-    if not BOSINT_API_KEY:
-        return None
-    url = f'{BOSINT_API_BASE}/{BOSINT_API_KEY}/{command}/{query}'
+async def ghosint_search(query: str, services: List[str]) -> Dict[str, Any]:
+    """
+    POST https://api.ghosint.io/search
+    Returns the raw 'response' dict keyed by service name, or {} on failure.
+    """
+    if not GHOSINT_API_KEY or not services:
+        return {}
+    body = {"key": GHOSINT_API_KEY, "query": query, "services": services}
     try:
-        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as hclient:
-            resp = await hclient.get(url, headers=_bosint_headers())
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as hclient:
+            resp = await hclient.post(
+                f"{GHOSINT_API_BASE}/search",
+                json=body,
+                headers={"Content-Type": "application/json", "Accept": "application/json"},
+            )
             if resp.status_code == 200:
                 data = resp.json()
-                if data.get('success'):
-                    return data.get('data', data)
-            logger.warning(f"BOSINT {command} returned {resp.status_code}: {resp.text[:200]}")
+                if data.get("success"):
+                    logger.info(
+                        f"GHOSINT search OK — query={query!r} services={services} "
+                        f"credits_used={data.get('credits', {}).get('consumed', {}).get('actually', '?')}"
+                    )
+                    return data.get("response", {})
+                logger.warning(f"GHOSINT returned success=false: {data}")
+            else:
+                logger.warning(f"GHOSINT HTTP {resp.status_code}: {resp.text[:300]}")
     except Exception as e:
-        logger.error(f"BOSINT lookup error ({command}/{query}): {e}")
-    return None
-
-
-async def swatted_get(path: str, params: Optional[Dict] = None) -> Optional[Dict]:
-    """Call Swatted API via GET (no CSRF required)."""
-    if not SWATTED_SESSION_TOKEN:
-        return None
-    url = f'{SWATTED_API_BASE}{path}'
-    try:
-        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as hclient:
-            resp = await hclient.get(url, params=params, headers=_swatted_headers())
-            if resp.status_code == 200:
-                return resp.json()
-            logger.warning(f"Swatted GET {path} returned {resp.status_code}: {resp.text[:200]}")
-    except Exception as e:
-        logger.error(f"Swatted GET error ({path}): {e}")
-    return None
-
-
-async def swatted_post(path: str, body: Dict) -> Optional[Dict]:
-    """Call Swatted API via POST (CSRF token required)."""
-    if not SWATTED_SESSION_TOKEN:
-        return None
-    url = f'{SWATTED_API_BASE}{path}'
-    try:
-        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as hclient:
-            resp = await hclient.post(url, json=body, headers={
-                **_swatted_headers(with_csrf=True),
-                'Content-Type': 'application/json',
-            })
-            if resp.status_code == 200:
-                return resp.json()
-            logger.warning(f"Swatted POST {path} returned {resp.status_code}: {resp.text[:200]}")
-    except Exception as e:
-        logger.error(f"Swatted POST error ({path}): {e}")
-    return None
-
-
-def _swatted_result(data: Optional[Dict], source_name: str, risk: float = 0.3) -> Optional[Dict]:
-    """Wrap a Swatted response into a normalised OSINT result entry."""
-    if not data:
-        return None
-    return {"source": source_name, "data": data, "risk": risk}
+        logger.error(f"GHOSINT search error ({query!r}): {e}")
+    return {}
 
 
 # ============= ROUTES =============
@@ -1917,138 +1874,75 @@ async def update_suggestion_status(investigation_id: str, suggestion_id: str, st
 
 # ============= OSINT SEARCH =============
 
-@api_router.get("/osint/credentials")
-async def get_osint_credentials(x_api_key: str = Header(None)):
-    """
-    Return OSINT API credentials for client-side lookups.
-    The frontend uses these to call Swatted/BOSINT directly from the browser,
-    bypassing the Cloudflare IP-bind restriction that blocks server-side calls.
-    """
+@api_router.get("/osint/services")
+async def list_osint_services(x_api_key: str = Header(None)):
+    """Return available GHOSINT services with record counts and credit costs."""
     await validate_api_key(x_api_key)
-    return {
-        "bosint": {
-            "available": bool(BOSINT_API_KEY),
-            "base_url": BOSINT_API_BASE,
-            "api_key": BOSINT_API_KEY or None,
-        },
-        "swatted": {
-            "available": bool(SWATTED_SESSION_TOKEN),
-            "base_url": SWATTED_API_BASE,
-            "session_token": SWATTED_SESSION_TOKEN or None,
-            "user_id": SWATTED_USER_ID or None,
-            "csrf_token": SWATTED_CSRF_TOKEN or None,
-        },
-    }
+    if not GHOSINT_API_KEY:
+        return {"available": False, "services": []}
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as hclient:
+            resp = await hclient.get(f"{GHOSINT_API_BASE}/services",
+                                     headers={"Accept": "application/json"})
+            if resp.status_code == 200:
+                data = resp.json()
+                return {"available": True, "services": data.get("response", [])}
+    except Exception as e:
+        logger.error(f"GHOSINT services error: {e}")
+    return {"available": bool(GHOSINT_API_KEY), "services": []}
 
 
 @api_router.post("/osint/search")
 async def osint_search(input: OSINTSearchRequest, x_api_key: str = Header(None)):
     """
-    OSINT search endpoint. Tries real BOSINT/Swatted APIs first; falls back to
-    mock data when credentials are absent or the external API is unreachable.
-    Note: Swatted/BOSINT are Cloudflare-protected and may reject server-side
-    calls. In that case the frontend should use /osint/credentials to call
-    them directly from the browser.
+    OSINT search powered by GHOSINT (api.ghosint.io).
+    Queries multiple breach/OSINT services in a single API call.
+    Falls back to mock data when GHOSINT_API_KEY is not configured.
     """
     await validate_api_key(x_api_key)
 
     query = input.query.strip()
     search_type = input.search_type
-    results = []
-    sources_tried = []
 
-    # -------- BOSINT (URL-path auth, no session needed) --------
-    if BOSINT_API_KEY:
-        command_map = {
-            "email": "email", "username": "username", "domain": "domain",
-            "ip": "ip", "phone": "phone",
-        }
-        bosint_cmd = command_map.get(search_type)
-        if bosint_cmd:
-            sources_tried.append("bosint")
-            data = await bosint_lookup(bosint_cmd, query)
-            if data:
-                results.append({"source": "bosint", "data": data, "risk": 0.4})
+    # -------- GHOSINT live search --------
+    if GHOSINT_API_KEY:
+        services = _GHOSINT_SERVICES.get(search_type, ["ghosint.search"])
+        raw = await ghosint_search(query, services)
 
-    # -------- SWATTED (session-based auth) --------
-    if SWATTED_SESSION_TOKEN:
-        sources_tried.append("swatted")
+        if raw:
+            # Normalise each per-service result into a flat list
+            results = []
+            for svc_name, svc_data in raw.items():
+                if svc_data is None:
+                    continue
+                # svc_data may be a list of records or a dict
+                risk = _GHOSINT_RISK.get(svc_name, 0.5)
+                results.append({
+                    "source": svc_name,
+                    "data": svc_data,
+                    "risk": risk,
+                })
+            return {
+                "query": query,
+                "search_type": search_type,
+                "results": results,
+                "sources_queried": services,
+                "live_data": True,
+                "provider": "ghosint",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
 
-        if search_type == "email":
-            # LeakOSINT — broad breach search
-            r = await swatted_post("/api/leakosint/search", {"query": query})
-            if r:
-                results.append(_swatted_result(r, "swatted_leakosint", 0.7))
-            # Snusbase
-            r = await swatted_post("/api/snusbase/search", {"query": query})
-            if r:
-                results.append(_swatted_result(r, "swatted_snusbase", 0.6))
-
-        elif search_type == "username":
-            # Discord lookup
-            r = await swatted_get("/api/discord_lookup", {"userId": query})
-            if r:
-                results.append(_swatted_result(r, "swatted_discord", 0.2))
-            # Instagram
-            r = await swatted_get("/api/instagram_lookup", {"username": query})
-            if r:
-                results.append(_swatted_result(r, "swatted_instagram", 0.2))
-            # TikTok
-            r = await swatted_get("/api/tiktok_lookup", {"username": query})
-            if r:
-                results.append(_swatted_result(r, "swatted_tiktok", 0.2))
-            # Roblox
-            r = await swatted_get("/api/roblox_lookup", {"username": query})
-            if r:
-                results.append(_swatted_result(r, "swatted_roblox", 0.1))
-
-        elif search_type == "domain":
-            # Shodan DNS
-            r = await swatted_post("/api/shodan/dns", {"domain": query})
-            if r:
-                results.append(_swatted_result(r, "swatted_shodan_dns", 0.3))
-            # LeakOSINT domain
-            r = await swatted_post("/api/leakosint/search", {"query": query})
-            if r:
-                results.append(_swatted_result(r, "swatted_leakosint", 0.5))
-
-        elif search_type == "ip":
-            # Shodan host
-            r = await swatted_post("/api/shodan/host", {"ip": query})
-            if r:
-                results.append(_swatted_result(r, "swatted_shodan", 0.3))
-            # Cord.cat IP
-            r = await swatted_get("/api/cordcat/ip", {"userId": query})
-            if r:
-                results.append(_swatted_result(r, "swatted_cordcat_ip", 0.4))
-            # Stealerlog IP
-            r = await swatted_post("/api/stealerlogs/iplookup", {"query": query})
-            if r:
-                results.append(_swatted_result(r, "swatted_stealerlogs_ip", 0.6))
-
-        elif search_type == "phone":
-            r = await swatted_post("/api/stealerlogs/phonelookup", {"query": query})
-            if r:
-                results.append(_swatted_result(r, "swatted_stealerlogs_phone", 0.5))
-
-        elif search_type == "wallet":
-            r = await swatted_post("/api/crypto", {"query": query})
-            if r:
-                results.append(_swatted_result(r, "swatted_crypto", 0.5))
-
-    # -------- Fallback to mock if no real results --------
-    if not results:
-        results = MOCK_OSINT_DATA.get(search_type, [
-            {"source": "general", "data": f"No live results for {query}", "risk": 0.1}
-        ])
-        sources_tried.append("mock_fallback")
-
+    # -------- Fallback to mock --------
+    results = MOCK_OSINT_DATA.get(search_type, [
+        {"source": "general", "data": f"No results for {query}", "risk": 0.1}
+    ])
     return {
         "query": query,
         "search_type": search_type,
         "results": results,
-        "sources_tried": sources_tried,
-        "live_data": len(sources_tried) > 0 and "mock_fallback" not in sources_tried,
+        "sources_queried": [],
+        "live_data": False,
+        "provider": "mock",
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
