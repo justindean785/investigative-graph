@@ -36,9 +36,9 @@ const RELATIONSHIP_TYPES = [
   { value: 'associated_with', label: 'Associated with' },
 ];
 
-const EntitiesWorkspace = ({ investigationId, onNavigateToGraph, onNavigateToEvidence }) => {
+const EntitiesWorkspace = ({ investigationId, onNavigateToGraph, onNavigateToEvidence, searchQuery: globalSearchQuery = '' }) => {
   const { entities, relationships, addEntity, addRelationship, removeEntity, updateEntity } = useInvestigationStore();
-  
+
   const [searchQuery, setSearchQuery] = useState('');
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [showLinkDialog, setShowLinkDialog] = useState(false);
@@ -74,11 +74,12 @@ const EntitiesWorkspace = ({ investigationId, onNavigateToGraph, onNavigateToEvi
     return relationships.filter(r => r.fromId === entityId || r.toId === entityId);
   };
 
+  const activeQuery = globalSearchQuery || searchQuery;
   const filteredEntities = useMemo(() => entities.filter(entity =>
-    entity.value.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    (entity.label && entity.label.toLowerCase().includes(searchQuery.toLowerCase())) ||
-    entity.kind.toLowerCase().includes(searchQuery.toLowerCase())
-  ), [entities, searchQuery]);
+    entity.value.toLowerCase().includes(activeQuery.toLowerCase()) ||
+    (entity.label && entity.label.toLowerCase().includes(activeQuery.toLowerCase())) ||
+    entity.kind.toLowerCase().includes(activeQuery.toLowerCase())
+  ), [entities, activeQuery]);
 
   const handleAddEntity = async () => {
     if (!newEntity.value.trim()) {

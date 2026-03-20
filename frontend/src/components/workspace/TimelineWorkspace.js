@@ -19,7 +19,7 @@ const EVENT_CONFIG = {
   ai_analysis: { icon: Sparkles, color: '#7c3aed', label: 'AI Analysis' },
 };
 
-const TimelineWorkspace = ({ onNavigateToEvidence }) => {
+const TimelineWorkspace = ({ onNavigateToEvidence, searchQuery = '' }) => {
   const { timeline, entities, relationships, evidence } = useInvestigationStore();
 
   const getEventConfig = (type) => EVENT_CONFIG[type] || { 
@@ -48,8 +48,15 @@ const TimelineWorkspace = ({ onNavigateToEvidence }) => {
     });
   };
 
-  // Group timeline by date
-  const groupedTimeline = timeline.reduce((groups, event) => {
+  // Filter and group timeline by date
+  const displayedTimeline = searchQuery
+    ? timeline.filter(event =>
+        (event.summary || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+        (event.type || '').toLowerCase().includes(searchQuery.toLowerCase())
+      )
+    : timeline;
+
+  const groupedTimeline = displayedTimeline.reduce((groups, event) => {
     const date = new Date(event.ts).toDateString();
     if (!groups[date]) groups[date] = [];
     groups[date].push(event);
