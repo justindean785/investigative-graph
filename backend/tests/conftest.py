@@ -10,6 +10,7 @@ correct BASE_URL at import time.
 """
 import pytest
 import subprocess
+import tempfile
 import time
 import os
 import sys
@@ -24,8 +25,10 @@ SERVER_HOST = "0.0.0.0"
 SERVER_PORT = 8001
 BASE_URL = f"http://localhost:{SERVER_PORT}"
 MONGO_PORT = 27017
-MONGO_DATA_DIR = "/tmp/test_mongodb_data"
-MONGO_LOG = "/tmp/test_mongodb.log"
+TEST_DB_NAME = "trace_analyst_test"
+_TMP = tempfile.gettempdir()
+MONGO_DATA_DIR = os.path.join(_TMP, "test_mongodb_data")
+MONGO_LOG = os.path.join(_TMP, "test_mongodb.log")
 
 # Track processes so we can clean up
 _mongo_proc = None
@@ -38,9 +41,14 @@ def _find_mongod():
     mongod = shutil.which("mongod")
     if mongod:
         return mongod
-    conda_mongod = "/usr/share/miniconda/bin/mongod"
-    if os.path.isfile(conda_mongod):
-        return conda_mongod
+    # Check common conda/anaconda installation paths
+    for candidate in [
+        "/usr/share/miniconda/bin/mongod",
+        os.path.expanduser("~/miniconda3/bin/mongod"),
+        os.path.expanduser("~/anaconda3/bin/mongod"),
+    ]:
+        if os.path.isfile(candidate):
+            return candidate
     return None
 
 
@@ -81,7 +89,7 @@ def _ensure_emergent_stub():
     except (ImportError, TypeError):
         pass
 
-    stub_dir = "/tmp/emergentintegrations_stub"
+    stub_dir = os.path.join(_TMP, "emergentintegrations_stub")
     os.makedirs(f"{stub_dir}/emergentintegrations/llm", exist_ok=True)
 
     with open(f"{stub_dir}/setup.py", "w") as f:
@@ -171,13 +179,13 @@ def pytest_configure(config):
         _env_created = True
         with open(env_path, "w") as f:
             f.write("MONGO_URL=mongodb://localhost:27017\n")
-            f.write("DB_NAME=trace_analyst_test\n")
+            f.write(f"DB_NAME={TEST_DB_NAME}\n")
 
     # 4. Start FastAPI server
     if not _wait_for_port("127.0.0.1", SERVER_PORT, timeout=1):
         server_env = os.environ.copy()
         server_env["MONGO_URL"] = "mongodb://localhost:27017"
-        server_env["DB_NAME"] = "trace_analyst_test"
+        server_env["DB_NAME"] = TEST_DB_NAME
 
         _server_proc = subprocess.Popen(
             [
