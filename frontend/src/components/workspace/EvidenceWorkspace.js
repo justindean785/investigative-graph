@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import { 
   FileBox, Plus, Link2, Image, Globe, FileText, Wallet, Archive, MessageSquare, 
   Trash2, ExternalLink, ChevronRight, Sparkles, Upload, ClipboardPaste, Loader2,
@@ -125,16 +125,43 @@ const ENTITY_TYPE_ICONS = {
   hash: { icon: Hash, color: '#94a3b8' },
 };
 
-const EvidenceWorkspace = ({ investigationId, onNavigateToEntities }) => {
+const EvidenceWorkspace = ({ investigationId, onNavigateToEntities, searchQuery: globalSearchQuery = '' }) => {
   const { evidence, entities, addEvidence, addEntity, removeEvidence, updateEvidence } = useInvestigationStore();
-  
+
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [showQuickIngest, setShowQuickIngest] = useState(false);
   const [expandedEvidence, setExpandedEvidence] = useState(null);
   const [detectedEntities, setDetectedEntities] = useState([]);
   const [showDetectedPanel, setShowDetectedPanel] = useState(false);
   const [processingEvidence, setProcessingEvidence] = useState(null);
-  
+
+  // Evidence categories loaded from the backend API (falls back to the local constant while loading)
+  const [evidenceCategories, setEvidenceCategories] = useState(EVIDENCE_CATEGORIES);
+  useEffect(() => {
+    axios.get(`${API}/evidence/categories`)
+      .then(res => {
+        if (res.data && typeof res.data === 'object') {
+          // The API returns the same shape as EVIDENCE_CATEGORIES but without React icon references.
+          // Merge API types with local icon/color metadata so the UI remains intact.
+          const merged = {};
+          for (const [key, apiCat] of Object.entries(res.data)) {
+            const localCat = EVIDENCE_CATEGORIES[key] || {};
+            merged[key] = {
+              label: apiCat.label || localCat.label || key,
+              icon: localCat.icon || FileBox,
+              color: localCat.color || '#94a3b8',
+              types: (apiCat.types || []).map(t => ({ value: t.value, label: t.label })),
+            };
+          }
+          setEvidenceCategories(merged);
+        }
+      })
+      .catch(() => {
+        // Keep using the local fallback if the API is unreachable
+      });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Quick ingest states
   const [quickMode, setQuickMode] = useState('url'); // url, text, file
   const [quickUrl, setQuickUrl] = useState('');
@@ -142,7 +169,7 @@ const EvidenceWorkspace = ({ investigationId, onNavigateToEntities }) => {
   const [quickTitle, setQuickTitle] = useState('');
   const [quickLoading, setQuickLoading] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
-  
+
   const [selectedCategory, setSelectedCategory] = useState('web');
   const [newEvidence, setNewEvidence] = useState({
     evidence_type: 'webpage',
@@ -154,13 +181,13 @@ const EvidenceWorkspace = ({ investigationId, onNavigateToEntities }) => {
 
   // Get all evidence types as flat list
   const getAllTypes = () => {
-    return Object.values(EVIDENCE_CATEGORIES).flatMap(cat => 
+    return Object.values(evidenceCategories).flatMap(cat =>
       cat.types.map(t => ({ ...t, categoryColor: cat.color }))
     );
   };
 
   const getTypeInfo = (type) => {
-    for (const cat of Object.values(EVIDENCE_CATEGORIES)) {
+    for (const cat of Object.values(evidenceCategories)) {
       const found = cat.types.find(t => t.value === type);
       if (found) return { ...found, color: cat.color, icon: cat.icon };
     }
@@ -565,7 +592,7 @@ const EvidenceWorkspace = ({ investigationId, onNavigateToEntities }) => {
                 <DialogTitle className="text-xl font-heading">Add Evidence</DialogTitle>
               </DialogHeader>
               <EvidenceForm 
-                categories={EVIDENCE_CATEGORIES}
+                categories={evidenceCategories}
                 selectedCategory={selectedCategory}
                 setSelectedCategory={setSelectedCategory}
                 newEvidence={newEvidence} 
@@ -576,7 +603,7 @@ const EvidenceWorkspace = ({ investigationId, onNavigateToEntities }) => {
           </Dialog>
 
           <div className="mt-10 grid grid-cols-4 gap-3">
-            {Object.entries(EVIDENCE_CATEGORIES).slice(0, 8).map(([key, cat]) => (
+            {Object.entries(evidenceCategories).slice(0, 8).map(([key, cat]) => (
               <div 
                 key={key}
                 className="p-3 rounded-sm bg-white/5 border border-white/5 text-center"
@@ -646,7 +673,7 @@ const EvidenceWorkspace = ({ investigationId, onNavigateToEntities }) => {
                 <DialogTitle className="text-xl font-heading">Add Evidence</DialogTitle>
               </DialogHeader>
               <EvidenceForm 
-                categories={EVIDENCE_CATEGORIES}
+                categories={evidenceCategories}
                 selectedCategory={selectedCategory}
                 setSelectedCategory={setSelectedCategory}
                 newEvidence={newEvidence} 
@@ -663,7 +690,15 @@ const EvidenceWorkspace = ({ investigationId, onNavigateToEntities }) => {
         {/* Evidence List */}
         <div className={`flex-1 overflow-y-auto p-4 ${showDetectedPanel ? 'border-r border-white/5' : ''}`}>
           <div className="space-y-3">
-            {evidence.map(item => {
+            {(globalSearchQuery
+              ? evidence.filter(item =>
+                  (item.content || '').toLowerCase().includes(globalSearchQuery.toLowerCase()) ||
+                  (item.type || '').toLowerCase().includes(globalSearchQuery.toLowerCase()) ||
+                  (item.title || '').toLowerCase().includes(globalSearchQuery.toLowerCase()) ||
+                  (item.sourceUrl || '').toLowerCase().includes(globalSearchQuery.toLowerCase())
+                )
+              : evidence
+            ).map(item => {
               const typeInfo = getTypeInfo(item.type);
               const isExpanded = expandedEvidence === item.id;
               const linkedEntities = entities.filter(e => item.linked?.entityIds?.includes(e.id));
