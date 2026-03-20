@@ -78,7 +78,7 @@ pydantic_core==2.41.5
 pyflakes==3.4.0
 Pygments==2.19.2
 PyJWT==2.11.0
-pymongo==4.5.0
+pymongo==4.6.3
 pyparsing==3.3.2
 PyPDF2==3.0.1
 pytesseract==0.3.13
