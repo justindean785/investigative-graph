@@ -1953,6 +1953,9 @@ async def ai_analyze(input: AIAnalysisRequest, x_api_key: str = Header(None)):
     await validate_api_key(x_api_key)
     await get_investigation_or_404(input.investigation_id)
 
+    if not _gemini_client:
+        raise HTTPException(status_code=503, detail="GEMINI_API_KEY is not configured on the server.")
+
     try:
         # Fetch investigation data
         entities = await db.entities.find({"investigation_id": input.investigation_id}, {"_id": 0}).to_list(1000)
@@ -1999,9 +2002,6 @@ Format as JSON array with structure:
         
         # Choose model based on mode
         model_name = "gemini-2.0-flash" if input.mode == "flash" else "gemini-1.5-pro"
-
-        if not _gemini_client:
-            raise HTTPException(status_code=503, detail="GEMINI_API_KEY is not configured on the server.")
 
         # Call Gemini directly via the google-genai SDK
         gemini_response = await _gemini_client.aio.models.generate_content(
@@ -2422,10 +2422,13 @@ async def chat_with_ai(
 ):
     """Interactive AI chat with investigation context"""
     await validate_api_key(x_api_key)
-    
+
+    if not _gemini_client:
+        raise HTTPException(status_code=503, detail="GEMINI_API_KEY is not configured on the server.")
+
     # Get or create session ID
     session_id = request.session_id or f"chat-{investigation_id}-{uuid.uuid4().hex[:8]}"
-    
+
     try:
         # Fetch investigation context
         investigation = await db.investigations.find_one(
@@ -2522,9 +2525,6 @@ Always be professional, precise, and focus on actionable intelligence. When anal
 CURRENT INVESTIGATION DATA:
 {investigation_context}
 """
-
-        if not _gemini_client:
-            raise HTTPException(status_code=503, detail="GEMINI_API_KEY is not configured on the server.")
 
         # Fetch prior messages in this session to restore conversation context
         prior_messages = await db.chat_messages.find(
