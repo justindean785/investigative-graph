@@ -153,41 +153,20 @@ const useInvestigationStore = create((set, get) => ({
   acceptAISuggestion: (suggestionId) => set((state) => {
     const suggestion = state.aiSuggestions.find(s => s.id === suggestionId);
     if (!suggestion) return state;
-    
-    let newState = { ...state };
+
     const timelineEvent = createTimelineEvent(
       'AI_SUGGESTION_ACCEPTED',
       `Accepted AI suggestion: ${suggestion.title}`,
       {},
       { suggestionId, type: suggestion.type },
     );
-    
-    // Execute actions
-    suggestion.actions?.forEach(action => {
-      if (action.kind === 'ADD_ENTITY') {
-        const newEntity = {
-          id: `ent-${Date.now()}-${Math.random()}`,
-          ...action.payload,
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        };
-        newState.entities = [...newState.entities, newEntity];
-      } else if (action.kind === 'ADD_EDGE') {
-        const newEdge = {
-          id: `edge-${Date.now()}-${Math.random()}`,
-          ...action.payload,
-          createdAt: new Date().toISOString(),
-        };
-        newState.relationships = [...newState.relationships, newEdge];
-      }
-    });
-    
+
     return {
-      ...newState,
-      aiSuggestions: state.aiSuggestions.map(s => 
+      ...state,
+      aiSuggestions: state.aiSuggestions.map(s =>
         s.id === suggestionId ? { ...s, status: 'accepted' } : s
       ),
-      timeline: [timelineEvent, ...newState.timeline],
+      timeline: [timelineEvent, ...state.timeline],
     };
   }),
   

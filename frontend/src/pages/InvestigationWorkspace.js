@@ -372,6 +372,7 @@ const InvestigationWorkspace = () => {
             <EvidenceWorkspace 
               investigationId={id} 
               onNavigateToEntities={() => navigateToTab('entities')}
+              searchQuery={globalSearch}
             />
           )}
           {activeTab === 'entities' && (
@@ -379,6 +380,7 @@ const InvestigationWorkspace = () => {
               investigationId={id}
               onNavigateToGraph={() => navigateToTab('graph')}
               onNavigateToEvidence={() => navigateToTab('evidence')}
+              searchQuery={globalSearch}
             />
           )}
           {activeTab === 'graph' && (
@@ -398,6 +400,7 @@ const InvestigationWorkspace = () => {
           {activeTab === 'timeline' && (
             <TimelineWorkspace 
               onNavigateToEvidence={() => navigateToTab('evidence')}
+              searchQuery={globalSearch}
             />
           )}
           {activeTab === 'chat' && (

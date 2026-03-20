@@ -14,8 +14,8 @@ const SUGGESTION_CONFIG = {
 };
 
 const AISuggestionsWorkspace = ({ investigationId, onNavigateToEvidence }) => {
-  const { entities, relationships, aiSuggestions, acceptAISuggestion, dismissAISuggestion, setAISuggestions } = useInvestigationStore();
-  
+  const { entities, relationships, aiSuggestions, acceptAISuggestion, dismissAISuggestion, setAISuggestions, addEntity, addRelationship, setEntities, setRelationships } = useInvestigationStore();
+
   const [analyzing, setAnalyzing] = useState(false);
   const [mode, setMode] = useState('flash');
 
@@ -59,16 +59,59 @@ const AISuggestionsWorkspace = ({ investigationId, onNavigateToEvidence }) => {
   };
 
   const handleAccept = async (suggestionId) => {
+    const suggestion = aiSuggestions.find(s => s.id === suggestionId);
     try {
+      // Persist status change to backend
       await axios.patch(`${API}/investigations/${investigationId}/suggestions/${suggestionId}`, null, {
         params: { status: 'accepted' }
       });
+
+      // Persist any ADD_ENTITY / ADD_EDGE actions carried in action_data
+      if (suggestion?.actions) {
+        for (const action of suggestion.actions) {
+          if (action.kind === 'ADD_ENTITY' && action.payload?.entity_type && action.payload?.value) {
+            try {
+              const res = await axios.post(`${API}/investigations/${investigationId}/entities`, action.payload);
+              addEntity({
+                id: res.data.id,
+                kind: res.data.entity_type,
+                value: res.data.value,
+                label: res.data.label || res.data.value,
+                notes: res.data.notes || '',
+                tags: [],
+                sources: res.data.sources || [],
+                confidence: res.data.confidence || 0.5,
+                risk: (res.data.risk_score || 0) * 100,
+                createdAt: res.data.created_at,
+              });
+            } catch (e) {
+              console.warn('Failed to persist ADD_ENTITY action:', e);
+            }
+          } else if (action.kind === 'ADD_EDGE' && action.payload?.source_entity_id && action.payload?.target_entity_id) {
+            try {
+              const res = await axios.post(`${API}/investigations/${investigationId}/relationships`, action.payload);
+              addRelationship({
+                id: res.data.id,
+                fromId: res.data.source_entity_id,
+                toId: res.data.target_entity_id,
+                relType: res.data.relationship_type,
+                label: res.data.label || res.data.relationship_type,
+                confidence: res.data.confidence || 0.5,
+                sources: [],
+                createdAt: res.data.created_at,
+              });
+            } catch (e) {
+              console.warn('Failed to persist ADD_EDGE action:', e);
+            }
+          }
+        }
+      }
+
       acceptAISuggestion(suggestionId);
       toast.success('Suggestion accepted');
     } catch (error) {
-      // Still accept locally even if API fails
-      acceptAISuggestion(suggestionId);
-      toast.success('Suggestion accepted');
+      console.error('Failed to accept suggestion:', error);
+      toast.error('Failed to accept suggestion');
     }
   };
 
