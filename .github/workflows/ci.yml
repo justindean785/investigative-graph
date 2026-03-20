@@ -46,10 +46,6 @@ jobs:
           grep -v "emergentintegrations" backend/requirements.txt > /tmp/ci-requirements.txt
           pip install -r /tmp/ci-requirements.txt
 
-      - name: Create backend .env file
-        run: |
-          printf "MONGO_URL=mongodb://localhost:27017\nDB_NAME=trace_analyst_test\n" > backend/.env
-
       - name: Run backend tests
         run: |
           python -m pytest backend/tests/ -v --tb=short
