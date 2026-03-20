@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { Users, Plus, Link2, Trash2, ChevronRight, Search, ArrowRight, Network } from 'lucide-react';
+import { Users, Plus, Link2, Trash2, ChevronRight, Search, ArrowRight, Network, Pencil } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
@@ -37,16 +37,25 @@ const RELATIONSHIP_TYPES = [
 ];
 
 const EntitiesWorkspace = ({ investigationId, onNavigateToGraph, onNavigateToEvidence }) => {
-  const { entities, relationships, addEntity, addRelationship, removeEntity } = useInvestigationStore();
+  const { entities, relationships, addEntity, addRelationship, removeEntity, updateEntity } = useInvestigationStore();
   
   const [searchQuery, setSearchQuery] = useState('');
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [showLinkDialog, setShowLinkDialog] = useState(false);
+  const [showEditDialog, setShowEditDialog] = useState(false);
+  const [editingEntity, setEditingEntity] = useState(null);
   const [selectedEntity, setSelectedEntity] = useState(null);
   const [expandedEntity, setExpandedEntity] = useState(null);
 
   const [newEntity, setNewEntity] = useState({
     entity_type: 'person',
+    value: '',
+    label: '',
+    notes: '',
+    confidence: 0.5,
+  });
+
+  const [editEntity, setEditEntity] = useState({
     value: '',
     label: '',
     notes: '',
@@ -157,6 +166,51 @@ const EntitiesWorkspace = ({ investigationId, onNavigateToGraph, onNavigateToEvi
       toast.success('Entity deleted');
     } catch (error) {
       toast.error('Failed to delete entity');
+    }
+  };
+
+  const handleOpenEditDialog = (entity, e) => {
+    e.stopPropagation();
+    setEditingEntity(entity);
+    setEditEntity({
+      value: entity.value || '',
+      label: entity.label || '',
+      notes: entity.notes || '',
+      confidence: entity.confidence || 0.5,
+    });
+    setShowEditDialog(true);
+  };
+
+  const handleSaveEdit = async () => {
+    if (!editingEntity) return;
+    if (!editEntity.value.trim()) {
+      toast.error('Entity value is required');
+      return;
+    }
+    try {
+      const payload = {
+        value: editEntity.value.trim(),
+        label: editEntity.label.trim() || undefined,
+        notes: editEntity.notes,
+        confidence: editEntity.confidence,
+      };
+      await axios.patch(
+        `${API}/investigations/${investigationId}/entities/${editingEntity.id}`,
+        payload
+      );
+      // Update local store so UI reflects changes immediately
+      updateEntity(editingEntity.id, {
+        value: payload.value,
+        label: payload.label || payload.value,
+        notes: payload.notes,
+        confidence: payload.confidence,
+      });
+      toast.success('Entity updated');
+      setShowEditDialog(false);
+      setEditingEntity(null);
+    } catch (error) {
+      console.error('Failed to update entity:', error);
+      toast.error('Failed to update entity');
     }
   };
 
@@ -423,14 +477,25 @@ const EntitiesWorkspace = ({ investigationId, onNavigateToGraph, onNavigateToEvi
                       </div>
                     </div>
 
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={(e) => handleDeleteEntity(entity.id, e)}
-                      className="h-7 w-7 p-0 text-slate-500 hover:text-red-400 opacity-0 group-hover:opacity-100"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </Button>
+                    <div className="flex items-center gap-1 flex-shrink-0">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={(e) => handleOpenEditDialog(entity, e)}
+                        className="h-7 w-7 p-0 text-slate-500 hover:text-cyan-400"
+                        title="Edit entity"
+                      >
+                        <Pencil className="w-3.5 h-3.5" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={(e) => handleDeleteEntity(entity.id, e)}
+                        className="h-7 w-7 p-0 text-slate-500 hover:text-red-400 opacity-0 group-hover:opacity-100"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </Button>
+                    </div>
                   </div>
                 </div>
 
@@ -465,6 +530,64 @@ const EntitiesWorkspace = ({ investigationId, onNavigateToGraph, onNavigateToEvi
           })}
         </div>
       </div>
+
+      {/* Edit Entity Dialog */}
+      <Dialog open={showEditDialog} onOpenChange={setShowEditDialog}>
+        <DialogContent className="glass-strong border-white/10 text-white max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-xl font-heading">Edit Entity</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 mt-4">
+            <div>
+              <Label className="text-xs font-semibold text-cyan-500/80 uppercase tracking-wider">Value</Label>
+              <Input
+                value={editEntity.value}
+                onChange={(e) => setEditEntity({ ...editEntity, value: e.target.value })}
+                className="mt-2 bg-black/50 border-white/10 text-white"
+                placeholder="e.g., john@example.com"
+              />
+            </div>
+            <div>
+              <Label className="text-xs font-semibold text-cyan-500/80 uppercase tracking-wider">Label (Optional)</Label>
+              <Input
+                value={editEntity.label}
+                onChange={(e) => setEditEntity({ ...editEntity, label: e.target.value })}
+                className="mt-2 bg-black/50 border-white/10 text-white"
+                placeholder="Display name"
+              />
+            </div>
+            <div>
+              <Label className="text-xs font-semibold text-cyan-500/80 uppercase tracking-wider">Confidence</Label>
+              <div className="flex items-center gap-3 mt-2">
+                <input
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={editEntity.confidence}
+                  onChange={(e) => setEditEntity({ ...editEntity, confidence: parseFloat(e.target.value) })}
+                  className="flex-1"
+                />
+                <span className="text-white text-sm w-12 text-right">
+                  {Math.round(editEntity.confidence * 100)}%
+                </span>
+              </div>
+            </div>
+            <div>
+              <Label className="text-xs font-semibold text-cyan-500/80 uppercase tracking-wider">Notes</Label>
+              <textarea
+                value={editEntity.notes}
+                onChange={(e) => setEditEntity({ ...editEntity, notes: e.target.value })}
+                className="mt-2 w-full bg-black/50 border border-white/10 text-white rounded-sm px-3 py-2 min-h-[60px] text-sm"
+                placeholder="Additional notes"
+              />
+            </div>
+            <Button onClick={handleSaveEdit} className="w-full bg-emerald-500 hover:bg-emerald-600 text-white rounded-sm">
+              Save Changes
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 };

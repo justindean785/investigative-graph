@@ -126,7 +126,7 @@ const ENTITY_TYPE_ICONS = {
 };
 
 const EvidenceWorkspace = ({ investigationId, onNavigateToEntities }) => {
-  const { evidence, entities, addEvidence, addEntity, removeEvidence } = useInvestigationStore();
+  const { evidence, entities, addEvidence, addEntity, removeEvidence, updateEvidence } = useInvestigationStore();
   
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [showQuickIngest, setShowQuickIngest] = useState(false);
@@ -333,6 +333,7 @@ const EvidenceWorkspace = ({ investigationId, onNavigateToEntities }) => {
     if (files.length > 0) {
       handleFileUpload(files[0]);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Add detected entity to investigation
@@ -472,6 +473,19 @@ const EvidenceWorkspace = ({ investigationId, onNavigateToEntities }) => {
       toast.success('Evidence deleted');
     } catch (error) {
       toast.error('Failed to delete evidence');
+    }
+  };
+
+  const handleUpdateVerification = async (evidenceId, newStatus, e) => {
+    e.stopPropagation();
+    try {
+      await axios.patch(`${API}/investigations/${investigationId}/evidence/${evidenceId}`, {
+        verification_status: newStatus,
+      });
+      updateEvidence(evidenceId, { verificationStatus: newStatus });
+      toast.success(`Marked as ${newStatus}`);
+    } catch (error) {
+      toast.error('Failed to update status');
     }
   };
 
@@ -708,6 +722,31 @@ const EvidenceWorkspace = ({ investigationId, onNavigateToEntities }) => {
                               {linkedEntities.length} linked
                             </span>
                           )}
+                          {/* Verification status badge with cycle button */}
+                          {(() => {
+                            const status = item.verificationStatus || 'unverified';
+                            const statusStyles = {
+                              verified: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20',
+                              unverified: 'bg-slate-500/10 text-slate-400 border-slate-500/20',
+                              disputed: 'bg-red-500/10 text-red-400 border-red-500/20',
+                            };
+                            const nextStatus = { verified: 'disputed', unverified: 'verified', disputed: 'unverified' };
+                            return (
+                              <button
+                                onClick={(e) => handleUpdateVerification(item.id, nextStatus[status], e)}
+                                className={`text-[10px] px-2 py-0.5 rounded-sm border ${statusStyles[status]} hover:opacity-80 transition-opacity`}
+                                title="Click to cycle status"
+                              >
+                                {status}
+                              </button>
+                            );
+                          })()}
+                          {/* Tags display */}
+                          {(item.tags || []).map(tag => (
+                            <span key={tag} className="text-[10px] bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 px-2 py-0.5 rounded-sm">
+                              {tag}
+                            </span>
+                          ))}
                         </div>
                       </div>
 
