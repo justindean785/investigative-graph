@@ -1,5 +1,4 @@
 from fastapi import FastAPI, APIRouter, HTTPException, Header, UploadFile, File, Form
-from fastapi.responses import StreamingResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
@@ -16,7 +15,6 @@ import json
 import re
 import collections
 import httpx
-import base64
 from io import BytesIO
 
 # Optional OCR/PDF imports
@@ -968,8 +966,6 @@ def generate_investigation_leads(entities: List[Dict], relationships: List[Dict]
     Automated hypothesis generation engine that analyzes investigation data
     and produces actionable investigative leads.
     """
-    import hashlib
-    import random
     from collections import defaultdict
     
     leads = []
