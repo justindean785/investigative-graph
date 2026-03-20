@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "copilot/**"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  backend-tests:
+    name: Backend Integration Tests
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install MongoDB
+        run: |
+          # Import MongoDB public GPG key
+          curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc | \
+            sudo gpg -o /usr/share/keyrings/mongodb-server-7.0.gpg --dearmor
+          # Add MongoDB repository
+          echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg ] \
+            https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse" | \
+            sudo tee /etc/apt/sources.list.d/mongodb-org-7.0.list
+          sudo apt-get update -qq
+          sudo apt-get install -y mongodb-org
+          # Verify mongod is available
+          mongod --version
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # emergentintegrations is a private package; the test conftest.py
+          # installs a lightweight stub automatically before tests run.
+          grep -v "emergentintegrations" backend/requirements.txt > /tmp/ci-requirements.txt
+          pip install -r /tmp/ci-requirements.txt
+
+      - name: Run backend tests
+        run: |
+          python -m pytest backend/tests/ -v --tb=short
+        env:
+          PYTHONPATH: ${{ github.workspace }}/backend
