@@ -562,6 +562,251 @@ class TestReport:
         assert "timeline" in data
         print(f"Generated report with {data['statistics']['total_entities']} entities")
 
+
+class TestEntityUpdate:
+    """Test entity PATCH endpoint"""
+
+    @pytest.fixture
+    def setup(self):
+        """Create investigation + entity for update tests."""
+        inv_resp = requests.post(
+            f"{BASE_URL}/api/investigations",
+            json={"name": f"TEST_EntityUpdate_{uuid.uuid4().hex[:8]}", "description": "entity update test"},
+            headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
+        )
+        inv = inv_resp.json()
+        ent_resp = requests.post(
+            f"{BASE_URL}/api/investigations/{inv['id']}/entities",
+            json={"entity_type": "email", "value": "original@example.com", "notes": "original note"},
+            headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
+        )
+        entity = ent_resp.json()
+        yield inv["id"], entity["id"]
+        requests.delete(f"{BASE_URL}/api/investigations/{inv['id']}", headers={"x-api-key": API_KEY})
+
+    def test_patch_entity_notes(self, setup):
+        """PATCH entity should update notes field."""
+        inv_id, ent_id = setup
+        resp = requests.patch(
+            f"{BASE_URL}/api/investigations/{inv_id}/entities/{ent_id}",
+            json={"notes": "updated note"},
+            headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["notes"] == "updated note"
+        assert data["value"] == "original@example.com"  # unchanged
+        print("Entity notes updated correctly")
+
+    def test_patch_entity_confidence(self, setup):
+        """PATCH entity should update confidence field."""
+        inv_id, ent_id = setup
+        resp = requests.patch(
+            f"{BASE_URL}/api/investigations/{inv_id}/entities/{ent_id}",
+            json={"confidence": 0.9},
+            headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["confidence"] == 0.9
+        print("Entity confidence updated correctly")
+
+    def test_patch_entity_not_found(self, setup):
+        """PATCH entity should return 404 for unknown ID."""
+        inv_id, _ = setup
+        resp = requests.patch(
+            f"{BASE_URL}/api/investigations/{inv_id}/entities/nonexistent-id",
+            json={"notes": "should fail"},
+            headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
+        )
+        assert resp.status_code == 404
+
+
+class TestEvidenceUpdate:
+    """Test evidence PATCH endpoint"""
+
+    @pytest.fixture
+    def setup(self):
+        """Create investigation + evidence for update tests."""
+        inv_resp = requests.post(
+            f"{BASE_URL}/api/investigations",
+            json={"name": f"TEST_EvidenceUpdate_{uuid.uuid4().hex[:8]}", "description": "evidence update test"},
+            headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
+        )
+        inv = inv_resp.json()
+        ev_resp = requests.post(
+            f"{BASE_URL}/api/investigations/{inv['id']}/evidence",
+            json={"evidence_type": "document", "content": "some content", "notes": "original"},
+            headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
+        )
+        evidence = ev_resp.json()
+        yield inv["id"], evidence["id"]
+        requests.delete(f"{BASE_URL}/api/investigations/{inv['id']}", headers={"x-api-key": API_KEY})
+
+    def test_patch_evidence_tags(self, setup):
+        """PATCH evidence should update tags field."""
+        inv_id, ev_id = setup
+        resp = requests.patch(
+            f"{BASE_URL}/api/investigations/{inv_id}/evidence/{ev_id}",
+            json={"tags": ["critical", "reviewed"]},
+            headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "critical" in data["tags"]
+        assert "reviewed" in data["tags"]
+        print("Evidence tags updated correctly")
+
+    def test_patch_evidence_verification_status(self, setup):
+        """PATCH evidence should update verification_status."""
+        inv_id, ev_id = setup
+        resp = requests.patch(
+            f"{BASE_URL}/api/investigations/{inv_id}/evidence/{ev_id}",
+            json={"verification_status": "verified"},
+            headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["verification_status"] == "verified"
+        print("Evidence verification status updated correctly")
+
+
+class TestEntityDeduplication:
+    """Test entity duplicate detection and merge endpoints."""
+
+    @pytest.fixture
+    def setup(self):
+        """Create investigation with duplicate entities."""
+        inv_resp = requests.post(
+            f"{BASE_URL}/api/investigations",
+            json={"name": f"TEST_Dedup_{uuid.uuid4().hex[:8]}", "description": "dedup test"},
+            headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
+        )
+        inv = inv_resp.json()
+        inv_id = inv["id"]
+
+        # Create two entities with the same value (duplicates)
+        e1 = requests.post(
+            f"{BASE_URL}/api/investigations/{inv_id}/entities",
+            json={"entity_type": "email", "value": "dup@example.com", "notes": "first"},
+            headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
+        ).json()
+        e2 = requests.post(
+            f"{BASE_URL}/api/investigations/{inv_id}/entities",
+            json={"entity_type": "email", "value": "dup@example.com", "notes": "second"},
+            headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
+        ).json()
+
+        yield inv_id, e1["id"], e2["id"]
+        requests.delete(f"{BASE_URL}/api/investigations/{inv_id}", headers={"x-api-key": API_KEY})
+
+    def test_find_duplicates(self, setup):
+        """GET /entities/duplicates should return exact-match pair."""
+        inv_id, e1_id, e2_id = setup
+        resp = requests.get(
+            f"{BASE_URL}/api/investigations/{inv_id}/entities/duplicates",
+            headers={"x-api-key": API_KEY},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["success"] is True
+        assert data["total_found"] >= 1
+        # Both entity IDs should appear in the first candidate pair
+        candidate = data["duplicate_candidates"][0]
+        ids_in_pair = {candidate["entity_a"]["id"], candidate["entity_b"]["id"]}
+        assert e1_id in ids_in_pair and e2_id in ids_in_pair
+        assert candidate["similarity_score"] == 1.0
+        print(f"Found {data['total_found']} duplicate candidate(s)")
+
+    def test_merge_entities(self, setup):
+        """POST /entities/merge should merge duplicate into primary."""
+        inv_id, e1_id, e2_id = setup
+        resp = requests.post(
+            f"{BASE_URL}/api/investigations/{inv_id}/entities/merge",
+            json={"primary_entity_id": e1_id, "duplicate_entity_id": e2_id},
+            headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["success"] is True
+        assert data["merged_entity_id"] == e2_id
+
+        # Verify duplicate is gone
+        entities_resp = requests.get(
+            f"{BASE_URL}/api/investigations/{inv_id}/entities",
+            headers={"x-api-key": API_KEY},
+        )
+        entity_ids = [e["id"] for e in entities_resp.json()]
+        assert e1_id in entity_ids
+        assert e2_id not in entity_ids
+        print("Entity merge successful — duplicate removed")
+
+
+class TestExport:
+    """Test investigation export endpoints."""
+
+    @pytest.fixture
+    def setup(self):
+        """Create investigation with data for export tests."""
+        inv_resp = requests.post(
+            f"{BASE_URL}/api/investigations",
+            json={"name": f"TEST_Export_{uuid.uuid4().hex[:8]}", "description": "export test"},
+            headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
+        )
+        inv = inv_resp.json()
+        inv_id = inv["id"]
+        # Add an entity
+        requests.post(
+            f"{BASE_URL}/api/investigations/{inv_id}/entities",
+            json={"entity_type": "email", "value": "export@example.com"},
+            headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
+        )
+        yield inv_id
+        requests.delete(f"{BASE_URL}/api/investigations/{inv_id}", headers={"x-api-key": API_KEY})
+
+    def test_export_json(self, setup):
+        """GET /export/json should return valid JSON with investigation data."""
+        inv_id = setup
+        resp = requests.get(
+            f"{BASE_URL}/api/investigations/{inv_id}/export/json",
+            headers={"x-api-key": API_KEY},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "investigation" in data
+        assert "entities" in data
+        assert len(data["entities"]) >= 1
+        assert "exported_at" in data
+        print(f"JSON export returned {len(data['entities'])} entities")
+
+    def test_export_csv(self, setup):
+        """GET /export/csv should return a ZIP file with CSV content."""
+        import io, zipfile
+        inv_id = setup
+        resp = requests.get(
+            f"{BASE_URL}/api/investigations/{inv_id}/export/csv",
+            headers={"x-api-key": API_KEY},
+        )
+        assert resp.status_code == 200
+        assert "application/zip" in resp.headers.get("content-type", "")
+        zf = zipfile.ZipFile(io.BytesIO(resp.content))
+        names = zf.namelist()
+        assert "entities.csv" in names
+        assert "relationships.csv" in names
+        print("CSV export ZIP contains expected files")
+
+    def test_export_markdown(self, setup):
+        """GET /export/markdown should return text/markdown report."""
+        inv_id = setup
+        resp = requests.get(
+            f"{BASE_URL}/api/investigations/{inv_id}/export/markdown",
+            headers={"x-api-key": API_KEY},
+        )
+        assert resp.status_code == 200
+        assert "text/markdown" in resp.headers.get("content-type", "")
+        body = resp.text
+        assert "# Investigation Report:" in body
+        assert "## Entities" in body
+        print("Markdown export contains expected sections")
+
 # Cleanup test data
 @pytest.fixture(scope="session", autouse=True)
 def cleanup_test_data():

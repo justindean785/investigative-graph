@@ -121,6 +121,10 @@ const useInvestigationStore = create((set, get) => ({
       timeline: [timelineEvent, ...state.timeline],
     };
   }),
+
+  updateEvidence: (id, updates) => set((state) => ({
+    evidence: state.evidence.map(e => e.id === id ? { ...e, ...updates } : e),
+  })),
   
   removeEvidence: (id) => set((state) => {
     const timelineEvent = createTimelineEvent(

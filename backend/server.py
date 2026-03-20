@@ -117,6 +117,16 @@ class EntityCreate(BaseModel):
     sources: List[str] = []
     notes: str = ""
 
+class EntityUpdate(BaseModel):
+    """Partial update model for entities — all fields optional."""
+    value: Optional[str] = None
+    label: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+    confidence: Optional[float] = None
+    risk_score: Optional[float] = None
+    sources: Optional[List[str]] = None
+    notes: Optional[str] = None
+
 class Relationship(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -156,6 +166,7 @@ class Evidence(BaseModel):
     source_url: str = ""
     content: str = ""
     notes: str = ""
+    tags: List[str] = []  # Analyst-defined tags for annotation and filtering
     verification_status: str = "unverified"  # verified, unverified, disputed
     collected_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -165,7 +176,15 @@ class EvidenceCreate(BaseModel):
     source_url: str = ""
     content: str = ""
     notes: str = ""
+    tags: List[str] = []
     verification_status: str = "unverified"
+
+class EvidenceUpdate(BaseModel):
+    """Partial update model for evidence — all fields optional."""
+    notes: Optional[str] = None
+    tags: Optional[List[str]] = None
+    verification_status: Optional[str] = None
+    entity_id: Optional[str] = None
 
 class AISuggestion(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -230,6 +249,11 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     message: str
     session_id: Optional[str] = None
+
+class EntityMergeRequest(BaseModel):
+    """Request to merge two entity records into one, keeping the primary entity."""
+    primary_entity_id: str   # Entity to keep
+    duplicate_entity_id: str  # Entity to remove; its relationships are re-parented to primary
 
 class URLIngestRequest(BaseModel):
     url: str
@@ -1416,6 +1440,8 @@ async def delete_investigation(investigation_id: str, x_api_key: str = Header(No
     await db.timeline_events.delete_many({"investigation_id": investigation_id})
     await db.evidence.delete_many({"investigation_id": investigation_id})
     await db.ai_suggestions.delete_many({"investigation_id": investigation_id})
+    await db.investigation_leads.delete_many({"investigation_id": investigation_id})
+    await db.chat_messages.delete_many({"investigation_id": investigation_id})
     
     return {"success": True, "message": "Investigation and all related data deleted"}
 
@@ -1475,6 +1501,46 @@ async def delete_entity(investigation_id: str, entity_id: str, x_api_key: str = 
     )
     
     return {"success": True}
+
+@api_router.patch("/investigations/{investigation_id}/entities/{entity_id}", response_model=Entity)
+async def update_entity(
+    investigation_id: str,
+    entity_id: str,
+    input: EntityUpdate,
+    x_api_key: str = Header(None),
+):
+    """Partially update an entity's mutable fields (value, label, notes, confidence, etc.)."""
+    await validate_api_key(x_api_key)
+
+    entity = await db.entities.find_one(
+        {"id": entity_id, "investigation_id": investigation_id}, {"_id": 0}
+    )
+    if not entity:
+        raise HTTPException(status_code=404, detail="Entity not found")
+
+    update_data = input.model_dump(exclude_unset=True)
+    if not update_data:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    await db.entities.update_one(
+        {"id": entity_id, "investigation_id": investigation_id},
+        {"$set": update_data},
+    )
+
+    updated = await db.entities.find_one(
+        {"id": entity_id, "investigation_id": investigation_id}, {"_id": 0}
+    )
+    if isinstance(updated.get("created_at"), str):
+        updated["created_at"] = datetime.fromisoformat(updated["created_at"])
+
+    await create_timeline_event(
+        investigation_id,
+        "entity_updated",
+        f"Entity updated: {updated.get('value', entity_id)}",
+        entity_id=entity_id,
+    )
+
+    return updated
 
 # ============= RELATIONSHIPS =============
 
@@ -1579,6 +1645,45 @@ async def delete_evidence(investigation_id: str, evidence_id: str, x_api_key: st
         raise HTTPException(status_code=404, detail="Evidence not found")
     
     return {"success": True}
+
+@api_router.patch("/investigations/{investigation_id}/evidence/{evidence_id}", response_model=Evidence)
+async def update_evidence(
+    investigation_id: str,
+    evidence_id: str,
+    input: EvidenceUpdate,
+    x_api_key: str = Header(None),
+):
+    """Partially update an evidence item — notes, tags, verification status, or linked entity."""
+    await validate_api_key(x_api_key)
+
+    ev = await db.evidence.find_one(
+        {"id": evidence_id, "investigation_id": investigation_id}, {"_id": 0}
+    )
+    if not ev:
+        raise HTTPException(status_code=404, detail="Evidence not found")
+
+    update_data = input.model_dump(exclude_unset=True)
+    if not update_data:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    await db.evidence.update_one(
+        {"id": evidence_id, "investigation_id": investigation_id},
+        {"$set": update_data},
+    )
+
+    updated = await db.evidence.find_one(
+        {"id": evidence_id, "investigation_id": investigation_id}, {"_id": 0}
+    )
+    if isinstance(updated.get("collected_at"), str):
+        updated["collected_at"] = datetime.fromisoformat(updated["collected_at"])
+
+    await create_timeline_event(
+        investigation_id,
+        "evidence_updated",
+        f"Evidence updated: {updated.get('evidence_type', evidence_id)}",
+    )
+
+    return updated
 
 # ============= AI SUGGESTIONS =============
 
@@ -2514,6 +2619,430 @@ async def get_evidence_categories(x_api_key: Optional[str] = Header(None)):
     """Get all available evidence categories and types"""
     await validate_api_key(x_api_key)
     return EVIDENCE_CATEGORIES
+
+# ============= ENTITY DEDUPLICATION & MERGE =============
+
+# Similarity thresholds used by the duplicate-detection heuristic
+_DEDUP_SUBSTRING_SCORE = 0.85   # score assigned when one value is a substring of the other
+_DEDUP_MIN_SCORE = 0.75          # minimum Jaccard bigram score to report as a candidate
+
+
+def _bigrams(s: str) -> set:
+    """Return the set of character bigrams for a string."""
+    return {s[i:i + 2] for i in range(len(s) - 1)}
+
+
+@api_router.get("/investigations/{investigation_id}/entities/duplicates")
+async def find_duplicate_entities(
+    investigation_id: str,
+    x_api_key: Optional[str] = Header(None),
+):
+    """
+    Detect potential duplicate entities within an investigation by comparing
+    normalised values across entities of the same type.  Returns candidate
+    pairs with a similarity score so the analyst can decide whether to merge.
+    """
+    await validate_api_key(x_api_key)
+
+    entities = await db.entities.find(
+        {"investigation_id": investigation_id}, {"_id": 0}
+    ).to_list(1000)
+
+    # Group by type to limit comparison scope
+    by_type: Dict[str, list] = {}
+    for e in entities:
+        et = e.get("entity_type", "unknown")
+        by_type.setdefault(et, []).append(e)
+
+    candidates = []
+
+    for etype, group in by_type.items():
+        for i, a in enumerate(group):
+            for b in group[i + 1:]:
+                val_a = (a.get("value") or "").lower().strip()
+                val_b = (b.get("value") or "").lower().strip()
+                if not val_a or not val_b:
+                    continue
+
+                # Exact-match after normalisation
+                if val_a == val_b:
+                    score = 1.0
+                # One is a prefix/suffix of the other (e.g. domain vs www.domain)
+                elif val_a in val_b or val_b in val_a:
+                    score = _DEDUP_SUBSTRING_SCORE
+                # Character-overlap heuristic (Jaccard on character bigrams)
+                else:
+                    bg_a = _bigrams(val_a)
+                    bg_b = _bigrams(val_b)
+                    union = bg_a | bg_b
+                    score = len(bg_a & bg_b) / len(union) if union else 0.0
+
+                if score >= _DEDUP_MIN_SCORE:
+                    candidates.append({
+                        "entity_a": {
+                            "id": a["id"],
+                            "value": a.get("value"),
+                            "label": a.get("label"),
+                            "type": etype,
+                        },
+                        "entity_b": {
+                            "id": b["id"],
+                            "value": b.get("value"),
+                            "label": b.get("label"),
+                            "type": etype,
+                        },
+                        "similarity_score": round(score, 3),
+                        "match_type": "exact" if score == 1.0 else "fuzzy",
+                    })
+
+    # Sort by highest similarity first
+    candidates.sort(key=lambda x: x["similarity_score"], reverse=True)
+
+    return {
+        "success": True,
+        "duplicate_candidates": candidates,
+        "total_found": len(candidates),
+    }
+
+
+@api_router.post("/investigations/{investigation_id}/entities/merge")
+async def merge_entities(
+    investigation_id: str,
+    request: EntityMergeRequest,
+    x_api_key: Optional[str] = Header(None),
+):
+    """
+    Merge a duplicate entity into a primary entity.
+    All relationships that pointed to the duplicate are re-parented to the
+    primary entity, evidence links are updated, and the duplicate is deleted.
+    The primary entity's sources list is augmented with the duplicate's sources.
+    """
+    await validate_api_key(x_api_key)
+
+    primary = await db.entities.find_one(
+        {"id": request.primary_entity_id, "investigation_id": investigation_id},
+        {"_id": 0},
+    )
+    if not primary:
+        raise HTTPException(status_code=404, detail="Primary entity not found")
+
+    duplicate = await db.entities.find_one(
+        {"id": request.duplicate_entity_id, "investigation_id": investigation_id},
+        {"_id": 0},
+    )
+    if not duplicate:
+        raise HTTPException(status_code=404, detail="Duplicate entity not found")
+
+    if primary["id"] == duplicate["id"]:
+        raise HTTPException(status_code=400, detail="Cannot merge an entity with itself")
+
+    dup_id = duplicate["id"]
+    pri_id = primary["id"]
+
+    # Re-parent relationships: replace duplicate references with primary
+    await db.relationships.update_many(
+        {"investigation_id": investigation_id, "source_entity_id": dup_id},
+        {"$set": {"source_entity_id": pri_id}},
+    )
+    await db.relationships.update_many(
+        {"investigation_id": investigation_id, "target_entity_id": dup_id},
+        {"$set": {"target_entity_id": pri_id}},
+    )
+
+    # Remove self-loops that may have been created
+    await db.relationships.delete_many(
+        {"investigation_id": investigation_id, "source_entity_id": pri_id, "target_entity_id": pri_id}
+    )
+
+    # Re-link evidence
+    await db.evidence.update_many(
+        {"investigation_id": investigation_id, "entity_id": dup_id},
+        {"$set": {"entity_id": pri_id}},
+    )
+
+    # Merge sources lists (deduplicate)
+    merged_sources = list(set(primary.get("sources", []) + duplicate.get("sources", [])))
+    # Merge notes if duplicate has non-empty notes
+    merged_notes = primary.get("notes", "")
+    if duplicate.get("notes"):
+        sep = "\n---\n" if merged_notes else ""
+        merged_notes = merged_notes + sep + duplicate.get("notes", "")
+
+    await db.entities.update_one(
+        {"id": pri_id},
+        {"$set": {"sources": merged_sources, "notes": merged_notes}},
+    )
+
+    # Delete the duplicate entity
+    await db.entities.delete_one({"id": dup_id, "investigation_id": investigation_id})
+
+    await create_timeline_event(
+        investigation_id,
+        "entities_merged",
+        f"Merged entity '{duplicate.get('value')}' into '{primary.get('value')}'",
+        entity_id=pri_id,
+        metadata={"merged_entity_id": dup_id, "primary_entity_id": pri_id},
+    )
+
+    # Return updated primary
+    updated_primary = await db.entities.find_one({"id": pri_id}, {"_id": 0})
+    if isinstance(updated_primary.get("created_at"), str):
+        updated_primary["created_at"] = datetime.fromisoformat(updated_primary["created_at"])
+
+    return {
+        "success": True,
+        "primary_entity": updated_primary,
+        "merged_entity_id": dup_id,
+    }
+
+# ============= EXPORT ENDPOINTS =============
+
+@api_router.get("/investigations/{investigation_id}/export/json")
+async def export_investigation_json(
+    investigation_id: str,
+    x_api_key: Optional[str] = Header(None),
+):
+    """
+    Export a complete investigation snapshot as a structured JSON document.
+    Includes investigation metadata, all entities, relationships, evidence,
+    and the 100 most recent timeline events.
+    """
+    from fastapi.responses import JSONResponse
+
+    await validate_api_key(x_api_key)
+
+    investigation = await db.investigations.find_one(
+        {"id": investigation_id}, {"_id": 0}
+    )
+    if not investigation:
+        raise HTTPException(status_code=404, detail="Investigation not found")
+
+    entities = await db.entities.find({"investigation_id": investigation_id}, {"_id": 0}).to_list(1000)
+    relationships = await db.relationships.find({"investigation_id": investigation_id}, {"_id": 0}).to_list(1000)
+    evidence = await db.evidence.find({"investigation_id": investigation_id}, {"_id": 0}).to_list(1000)
+    timeline = await db.timeline_events.find(
+        {"investigation_id": investigation_id}, {"_id": 0}
+    ).sort("timestamp", -1).to_list(100)
+    leads = await db.investigation_leads.find(
+        {"investigation_id": investigation_id}, {"_id": 0}
+    ).to_list(100)
+
+    payload = serialize_datetime({
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "investigation": investigation,
+        "statistics": {
+            "total_entities": len(entities),
+            "total_relationships": len(relationships),
+            "total_evidence": len(evidence),
+            "total_leads": len(leads),
+        },
+        "entities": entities,
+        "relationships": relationships,
+        "evidence": evidence,
+        "leads": leads,
+        "timeline": timeline,
+    })
+
+    case_id = investigation.get("case_id", investigation_id)
+    return JSONResponse(
+        content=payload,
+        headers={"Content-Disposition": f'attachment; filename="{case_id}_export.json"'},
+    )
+
+
+@api_router.get("/investigations/{investigation_id}/export/csv")
+async def export_investigation_csv(
+    investigation_id: str,
+    x_api_key: Optional[str] = Header(None),
+):
+    """
+    Export investigation entities and relationships as a ZIP containing two CSV files:
+    ``entities.csv`` and ``relationships.csv``.
+    """
+    import csv
+    import io
+    import zipfile
+    from fastapi.responses import StreamingResponse
+
+    await validate_api_key(x_api_key)
+
+    investigation = await db.investigations.find_one(
+        {"id": investigation_id}, {"_id": 0}
+    )
+    if not investigation:
+        raise HTTPException(status_code=404, detail="Investigation not found")
+
+    entities = await db.entities.find({"investigation_id": investigation_id}, {"_id": 0}).to_list(1000)
+    relationships = await db.relationships.find({"investigation_id": investigation_id}, {"_id": 0}).to_list(1000)
+
+    # Build entity CSV
+    entity_buf = io.StringIO()
+    ent_writer = csv.DictWriter(
+        entity_buf,
+        fieldnames=["id", "entity_type", "value", "label", "confidence", "risk_score", "notes", "created_at"],
+        extrasaction="ignore",
+    )
+    ent_writer.writeheader()
+    for e in entities:
+        ent_writer.writerow({
+            "id": e.get("id", ""),
+            "entity_type": e.get("entity_type", ""),
+            "value": e.get("value", ""),
+            "label": e.get("label", ""),
+            "confidence": e.get("confidence", ""),
+            "risk_score": e.get("risk_score", ""),
+            "notes": e.get("notes", ""),
+            "created_at": e.get("created_at", ""),
+        })
+
+    # Build relationship CSV
+    rel_buf = io.StringIO()
+    rel_writer = csv.DictWriter(
+        rel_buf,
+        fieldnames=["id", "source_entity_id", "target_entity_id", "relationship_type", "label", "confidence", "created_at"],
+        extrasaction="ignore",
+    )
+    rel_writer.writeheader()
+    for r in relationships:
+        rel_writer.writerow({
+            "id": r.get("id", ""),
+            "source_entity_id": r.get("source_entity_id", ""),
+            "target_entity_id": r.get("target_entity_id", ""),
+            "relationship_type": r.get("relationship_type", ""),
+            "label": r.get("label", ""),
+            "confidence": r.get("confidence", ""),
+            "created_at": r.get("created_at", ""),
+        })
+
+    # Package both CSVs into a ZIP in memory
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("entities.csv", entity_buf.getvalue())
+        zf.writestr("relationships.csv", rel_buf.getvalue())
+    zip_buf.seek(0)
+
+    case_id = investigation.get("case_id", investigation_id)
+    return StreamingResponse(
+        zip_buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{case_id}_export.zip"'},
+    )
+
+
+@api_router.get("/investigations/{investigation_id}/export/markdown")
+async def export_investigation_markdown(
+    investigation_id: str,
+    x_api_key: Optional[str] = Header(None),
+):
+    """
+    Export an investigation as a human-readable Markdown report suitable for
+    sharing or archival.  Includes a narrative summary, entity table,
+    relationship list, evidence inventory, and active leads.
+    """
+    from fastapi.responses import Response
+
+    # Truncation lengths for report columns / previews
+    _MD_ENTITY_VAL_LEN = 60
+    _MD_ENTITY_LBL_LEN = 40
+    _MD_REL_VAL_LEN = 40
+    _MD_CONTENT_PREVIEW_LEN = 100
+
+    await validate_api_key(x_api_key)
+
+    investigation = await db.investigations.find_one(
+        {"id": investigation_id}, {"_id": 0}
+    )
+    if not investigation:
+        raise HTTPException(status_code=404, detail="Investigation not found")
+
+    entities = await db.entities.find({"investigation_id": investigation_id}, {"_id": 0}).to_list(1000)
+    relationships = await db.relationships.find({"investigation_id": investigation_id}, {"_id": 0}).to_list(1000)
+    evidence = await db.evidence.find({"investigation_id": investigation_id}, {"_id": 0}).to_list(1000)
+    leads = await db.investigation_leads.find(
+        {"investigation_id": investigation_id}, {"_id": 0}
+    ).sort("confidence", -1).to_list(50)
+
+    entity_map = {e["id"]: e for e in entities}
+
+    lines: List[str] = []
+    lines.append(f"# Investigation Report: {investigation.get('name', 'Unknown')}")
+    lines.append(f"\n**Case ID:** `{investigation.get('case_id', 'N/A')}`  ")
+    lines.append(f"**Status:** {investigation.get('status', 'N/A')}  ")
+    lines.append(f"**Created:** {investigation.get('created_at', 'N/A')}  ")
+    lines.append(f"**Exported:** {datetime.now(timezone.utc).isoformat()}  ")
+    if investigation.get("description"):
+        lines.append(f"\n## Description\n\n{investigation['description']}")
+    if investigation.get("tags"):
+        lines.append(f"\n**Tags:** {', '.join(investigation['tags'])}")
+
+    lines.append("\n## Statistics\n")
+    lines.append("| Metric | Count |")
+    lines.append("|--------|-------|")
+    lines.append(f"| Entities | {len(entities)} |")
+    lines.append(f"| Relationships | {len(relationships)} |")
+    lines.append(f"| Evidence Items | {len(evidence)} |")
+    lines.append(f"| Active Leads | {len(leads)} |")
+
+    if entities:
+        lines.append(f"\n## Entities ({len(entities)})\n")
+        lines.append("| Type | Value | Label | Confidence | Risk |")
+        lines.append("|------|-------|-------|-----------|------|")
+        for e in sorted(entities, key=lambda x: x.get("risk_score", 0), reverse=True):
+            conf = f"{e.get('confidence', 0):.0%}"
+            risk = f"{e.get('risk_score', 0):.0%}"
+            val = (e.get("value") or "")[:_MD_ENTITY_VAL_LEN]
+            lbl = (e.get("label") or "")[:_MD_ENTITY_LBL_LEN]
+            lines.append(f"| {e.get('entity_type', '')} | {val} | {lbl} | {conf} | {risk} |")
+
+    if relationships:
+        lines.append(f"\n## Relationships ({len(relationships)})\n")
+        for r in relationships:
+            src = entity_map.get(r.get("source_entity_id", ""), {})
+            tgt = entity_map.get(r.get("target_entity_id", ""), {})
+            src_val = (src.get("value") or src.get("id", "?"))[:_MD_REL_VAL_LEN]
+            tgt_val = (tgt.get("value") or tgt.get("id", "?"))[:_MD_REL_VAL_LEN]
+            rel_type = r.get("relationship_type", "linked_to")
+            conf = f"{r.get('confidence', 0):.0%}"
+            lines.append(f"- **{src_val}** → `{rel_type}` → **{tgt_val}** *(confidence: {conf})*")
+
+    if evidence:
+        lines.append(f"\n## Evidence ({len(evidence)})\n")
+        for ev in evidence:
+            status_emoji = {"verified": "✅", "unverified": "⬜", "disputed": "❌"}.get(
+                ev.get("verification_status", "unverified"), "⬜"
+            )
+            ev_type = ev.get("evidence_type", "unknown")
+            url_part = f" [{ev.get('source_url', '')}]({ev.get('source_url', '')})" if ev.get("source_url") else ""
+            content_preview = (ev.get("content") or "")[:_MD_CONTENT_PREVIEW_LEN].replace("\n", " ")
+            tags_part = f" `{'` `'.join(ev.get('tags', []))}`" if ev.get("tags") else ""
+            lines.append(f"- {status_emoji} **[{ev_type}]**{url_part}{tags_part}: {content_preview}...")
+
+    if leads:
+        lines.append(f"\n## Investigation Leads ({len(leads)})\n")
+        for lead in leads:
+            sev_emoji = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}.get(
+                lead.get("severity", "medium"), "⬜"
+            )
+            conf_pct = f"{lead.get('confidence', 0):.0%}"
+            lines.append(f"### {sev_emoji} {lead.get('title', 'Untitled')} *(confidence: {conf_pct})*")
+            lines.append(f"\n{lead.get('description', '')}\n")
+            if lead.get("suggested_actions"):
+                lines.append("**Suggested Actions:**")
+                for action in lead["suggested_actions"][:3]:
+                    lines.append(f"- {action.get('description', str(action))}")
+            lines.append("")
+
+    if investigation.get("notes"):
+        lines.append(f"\n## Analyst Notes\n\n{investigation['notes']}")
+
+    markdown_content = "\n".join(lines)
+    case_id = investigation.get("case_id", investigation_id)
+
+    return Response(
+        content=markdown_content,
+        media_type="text/markdown",
+        headers={"Content-Disposition": f'attachment; filename="{case_id}_report.md"'},
+    )
 
 # Include the router in the main app
 app.include_router(api_router)
