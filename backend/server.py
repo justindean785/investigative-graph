@@ -10,7 +10,8 @@ from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional, Dict, Any, Literal
 import uuid
 from datetime import datetime, timezone
-from emergentintegrations.llm.chat import LlmChat, UserMessage
+from google import genai as google_genai
+from google.genai import types as genai_types
 import json
 import re
 import collections
@@ -49,7 +50,10 @@ client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
 API_KEY = os.environ.get('API_KEY', 'trace-analyst-secret-2026')
-EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY')
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY') or os.environ.get('EMERGENT_LLM_KEY')
+
+# Gemini client — initialised once at startup if a key is present
+_gemini_client = google_genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 # Create the main app without a prefix
 app = FastAPI()
@@ -1862,17 +1866,20 @@ Format as JSON array with structure:
 """
         
         # Choose model based on mode
-        model = "gemini-3-flash-preview" if input.mode == "flash" else "gemini-3-pro-preview"
-        
-        # Call Gemini
-        chat = LlmChat(
-            api_key=EMERGENT_LLM_KEY,
-            session_id=f"analysis-{input.investigation_id}",
-            system_message="You are an expert OSINT investigator providing actionable intelligence suggestions."
-        ).with_model("gemini", model)
-        
-        user_message = UserMessage(text=context)
-        response = await chat.send_message(user_message)
+        model_name = "gemini-2.0-flash" if input.mode == "flash" else "gemini-1.5-pro"
+
+        if not _gemini_client:
+            raise HTTPException(status_code=503, detail="GEMINI_API_KEY is not configured on the server.")
+
+        # Call Gemini directly via the google-genai SDK
+        gemini_response = await _gemini_client.aio.models.generate_content(
+            model=model_name,
+            contents=context,
+            config=genai_types.GenerateContentConfig(
+                system_instruction="You are an expert OSINT investigator providing actionable intelligence suggestions."
+            )
+        )
+        response = gemini_response.text
         
         # Parse AI response
         try:
@@ -1900,17 +1907,17 @@ Format as JSON array with structure:
             await create_timeline_event(
                 input.investigation_id,
                 "ai_analysis",
-                f"AI analysis completed using {model} - {len(suggestions_data)} suggestions generated"
+                f"AI analysis completed using {model_name} - {len(suggestions_data)} suggestions generated"
             )
-            
+
             return {
                 "success": True,
-                "model_used": model,
+                "model_used": model_name,
                 "suggestions_count": len(suggestions_data),
                 "suggestions": suggestions_data
             }
         except json.JSONDecodeError:
-            # Fallback: create generic suggestion
+            # Fallback: create generic suggestion from raw response text
             suggestion = AISuggestion(
                 investigation_id=input.investigation_id,
                 suggestion_type="lead",
@@ -1920,10 +1927,10 @@ Format as JSON array with structure:
             )
             doc = serialize_datetime(suggestion.model_dump())
             await db.ai_suggestions.insert_one(doc)
-            
+
             return {
                 "success": True,
-                "model_used": model,
+                "model_used": model_name,
                 "suggestions_count": 1,
                 "raw_response": response
             }
@@ -2384,14 +2391,28 @@ CURRENT INVESTIGATION DATA:
 {investigation_context}
 """
 
-        # Initialize chat
-        chat = LlmChat(
-            api_key=EMERGENT_LLM_KEY,
-            session_id=session_id,
-            system_message=system_message
-        ).with_model("gemini", "gemini-3-flash-preview")
+        if not _gemini_client:
+            raise HTTPException(status_code=503, detail="GEMINI_API_KEY is not configured on the server.")
 
-        # Store user message
+        # Fetch prior messages in this session to restore conversation context
+        prior_messages = await db.chat_messages.find(
+            {"investigation_id": investigation_id, "session_id": session_id},
+            {"_id": 0}
+        ).sort("timestamp", 1).to_list(20)
+
+        # Build full contents list: history + new user message
+        # Gemini roles: "user" or "model"
+        contents = []
+        for msg in prior_messages:
+            gemini_role = "user" if msg.get("role") == "user" else "model"
+            contents.append(
+                genai_types.Content(role=gemini_role, parts=[genai_types.Part(text=msg.get("content", ""))])
+            )
+        contents.append(
+            genai_types.Content(role="user", parts=[genai_types.Part(text=request.message)])
+        )
+
+        # Store user message before sending (persisted even if the AI call fails)
         user_msg = ChatMessage(
             investigation_id=investigation_id,
             session_id=session_id,
@@ -2400,10 +2421,15 @@ CURRENT INVESTIGATION DATA:
         )
         user_doc = serialize_datetime(user_msg.model_dump())
         await db.chat_messages.insert_one(user_doc)
-        
-        # Send message and get response
-        response = await chat.send_message(UserMessage(text=request.message))
-        
+
+        # Send to Gemini with full conversation context
+        gemini_response = await _gemini_client.aio.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=contents,
+            config=genai_types.GenerateContentConfig(system_instruction=system_message)
+        )
+        response = gemini_response.text
+
         # Store assistant message
         assistant_msg = ChatMessage(
             investigation_id=investigation_id,
