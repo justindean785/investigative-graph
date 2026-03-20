@@ -1,5 +1,17 @@
 import { create } from 'zustand';
 
+// Helper to create timeline events, reducing repetition across store actions
+function createTimelineEvent(type, summary, refs = {}, meta = {}) {
+  return {
+    id: `evt-${Date.now()}`,
+    ts: new Date().toISOString(),
+    type,
+    summary,
+    refs: { entityIds: [], evidenceIds: [], edgeIds: [], ...refs },
+    meta,
+  };
+}
+
 const useInvestigationStore = create((set, get) => ({
   // Investigation metadata
   investigation: null,
@@ -10,7 +22,6 @@ const useInvestigationStore = create((set, get) => ({
   evidence: [],
   timeline: [],
   aiSuggestions: [],
-  tasks: [],
   
   // UI state
   ui: {
@@ -33,18 +44,14 @@ const useInvestigationStore = create((set, get) => ({
   setEntities: (entities) => set({ entities }),
   
   addEntity: (entity) => set((state) => {
-    const newEntities = [...state.entities, entity];
-    // Add timeline event
-    const timelineEvent = {
-      id: `evt-${Date.now()}`,
-      ts: new Date().toISOString(),
-      type: 'ENTITY_ADDED',
-      summary: `Added ${entity.kind}: ${entity.value}`,
-      refs: { entityIds: [entity.id], evidenceIds: [], edgeIds: [] },
-      meta: { source: 'manual', confidence: entity.confidence },
-    };
+    const timelineEvent = createTimelineEvent(
+      'ENTITY_ADDED',
+      `Added ${entity.kind}: ${entity.value}`,
+      { entityIds: [entity.id] },
+      { source: 'manual', confidence: entity.confidence },
+    );
     return {
-      entities: newEntities,
+      entities: [...state.entities, entity],
       timeline: [timelineEvent, ...state.timeline],
     };
   }),
@@ -55,14 +62,11 @@ const useInvestigationStore = create((set, get) => ({
   
   removeEntity: (id) => set((state) => {
     const entity = state.entities.find(e => e.id === id);
-    const timelineEvent = {
-      id: `evt-${Date.now()}`,
-      ts: new Date().toISOString(),
-      type: 'ENTITY_REMOVED',
-      summary: `Removed ${entity?.kind || 'entity'}: ${entity?.value || ''}`,
-      refs: { entityIds: [id], evidenceIds: [], edgeIds: [] },
-      meta: {},
-    };
+    const timelineEvent = createTimelineEvent(
+      'ENTITY_REMOVED',
+      `Removed ${entity?.kind || 'entity'}: ${entity?.value || ''}`,
+      { entityIds: [id] },
+    );
     return {
       entities: state.entities.filter(e => e.id !== id),
       relationships: state.relationships.filter(r => r.fromId !== id && r.toId !== id),
@@ -73,32 +77,26 @@ const useInvestigationStore = create((set, get) => ({
   setRelationships: (relationships) => set({ relationships }),
   
   addRelationship: (relationship) => set((state) => {
-    const newRelationships = [...state.relationships, relationship];
     const fromEntity = state.entities.find(e => e.id === relationship.fromId);
     const toEntity = state.entities.find(e => e.id === relationship.toId);
-    const timelineEvent = {
-      id: `evt-${Date.now()}`,
-      ts: new Date().toISOString(),
-      type: 'EDGE_CREATED',
-      summary: `Connected ${fromEntity?.label || ''} ${relationship.relType} ${toEntity?.label || ''}`,
-      refs: { entityIds: [relationship.fromId, relationship.toId], evidenceIds: [], edgeIds: [relationship.id] },
-      meta: { confidence: relationship.confidence },
-    };
+    const timelineEvent = createTimelineEvent(
+      'EDGE_CREATED',
+      `Connected ${fromEntity?.label || ''} ${relationship.relType} ${toEntity?.label || ''}`,
+      { entityIds: [relationship.fromId, relationship.toId], edgeIds: [relationship.id] },
+      { confidence: relationship.confidence },
+    );
     return {
-      relationships: newRelationships,
+      relationships: [...state.relationships, relationship],
       timeline: [timelineEvent, ...state.timeline],
     };
   }),
   
   removeRelationship: (id) => set((state) => {
-    const timelineEvent = {
-      id: `evt-${Date.now()}`,
-      ts: new Date().toISOString(),
-      type: 'EDGE_REMOVED',
-      summary: 'Removed connection',
-      refs: { entityIds: [], evidenceIds: [], edgeIds: [id] },
-      meta: {},
-    };
+    const timelineEvent = createTimelineEvent(
+      'EDGE_REMOVED',
+      'Removed connection',
+      { edgeIds: [id] },
+    );
     return {
       relationships: state.relationships.filter(r => r.id !== id),
       timeline: [timelineEvent, ...state.timeline],
@@ -108,34 +106,28 @@ const useInvestigationStore = create((set, get) => ({
   setEvidence: (evidence) => set({ evidence }),
   
   addEvidence: (evidenceItem) => set((state) => {
-    const newEvidence = [...state.evidence, evidenceItem];
-    const timelineEvent = {
-      id: `evt-${Date.now()}`,
-      ts: new Date().toISOString(),
-      type: 'EVIDENCE_ADDED',
-      summary: `Added evidence: ${evidenceItem.title}`,
-      refs: { 
+    const timelineEvent = createTimelineEvent(
+      'EVIDENCE_ADDED',
+      `Added evidence: ${evidenceItem.title}`,
+      { 
         entityIds: evidenceItem.linked?.entityIds || [], 
         evidenceIds: [evidenceItem.id], 
         edgeIds: evidenceItem.linked?.edgeIds || [] 
       },
-      meta: { type: evidenceItem.type },
-    };
+      { type: evidenceItem.type },
+    );
     return {
-      evidence: newEvidence,
+      evidence: [...state.evidence, evidenceItem],
       timeline: [timelineEvent, ...state.timeline],
     };
   }),
   
   removeEvidence: (id) => set((state) => {
-    const timelineEvent = {
-      id: `evt-${Date.now()}`,
-      ts: new Date().toISOString(),
-      type: 'EVIDENCE_REMOVED',
-      summary: 'Removed evidence',
-      refs: { entityIds: [], evidenceIds: [id], edgeIds: [] },
-      meta: {},
-    };
+    const timelineEvent = createTimelineEvent(
+      'EVIDENCE_REMOVED',
+      'Removed evidence',
+      { evidenceIds: [id] },
+    );
     return {
       evidence: state.evidence.filter(e => e.id !== id),
       timeline: [timelineEvent, ...state.timeline],
@@ -159,14 +151,12 @@ const useInvestigationStore = create((set, get) => ({
     if (!suggestion) return state;
     
     let newState = { ...state };
-    const timelineEvent = {
-      id: `evt-${Date.now()}`,
-      ts: new Date().toISOString(),
-      type: 'AI_SUGGESTION_ACCEPTED',
-      summary: `Accepted AI suggestion: ${suggestion.title}`,
-      refs: { entityIds: [], evidenceIds: [], edgeIds: [] },
-      meta: { suggestionId, type: suggestion.type },
-    };
+    const timelineEvent = createTimelineEvent(
+      'AI_SUGGESTION_ACCEPTED',
+      `Accepted AI suggestion: ${suggestion.title}`,
+      {},
+      { suggestionId, type: suggestion.type },
+    );
     
     // Execute actions
     suggestion.actions?.forEach(action => {
@@ -241,7 +231,6 @@ const useInvestigationStore = create((set, get) => ({
     evidence: [],
     timeline: [],
     aiSuggestions: [],
-    tasks: [],
     ui: {
       selectedEntityId: null,
       selectedEdgeId: null,

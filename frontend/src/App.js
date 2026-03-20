@@ -5,9 +5,6 @@ import Dashboard from './pages/Dashboard';
 import InvestigationWorkspace from './pages/InvestigationWorkspace';
 import { Toaster } from './components/ui/sonner';
 
-// Re-export from config for backwards compatibility
-export { API, API_KEY, BACKEND_URL } from './config/api';
-
 function App() {
   return (
     <div className="App">
