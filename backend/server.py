@@ -1,21 +1,26 @@
 from fastapi import FastAPI, APIRouter, HTTPException, Header, UploadFile, File, Form
+from sse_starlette.sse import EventSourceResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
+from contextlib import asynccontextmanager
 import os
 import logging
 from pathlib import Path
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, field_validator
 from typing import List, Optional, Dict, Any
 import uuid
 from datetime import datetime, timezone
-from emergentintegrations.llm.chat import LlmChat, UserMessage
+from google import genai
 import json
 import re
 import collections
+import hmac
+import ipaddress
 import httpx
 from io import BytesIO
+from urllib.parse import urlparse
 
 # Optional OCR/PDF imports
 try:
@@ -46,13 +51,126 @@ client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
 API_KEY = os.environ.get('API_KEY', 'trace-analyst-secret-2026')
-EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY')
 
-# Create the main app without a prefix
-app = FastAPI()
+# Gemini AI — replaces the old emergentintegrations wrapper
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
+# Experimental model names (e.g. gemini-2.0-flash-exp) are removed from the API often.
+# Override in .env if Google renames models: GEMINI_MODEL_FLASH, GEMINI_MODEL_PRO, GEMINI_MODEL_CHAT
+GEMINI_MODEL_FLASH = os.environ.get("GEMINI_MODEL_FLASH", "gemini-2.0-flash")
+GEMINI_MODEL_PRO = os.environ.get("GEMINI_MODEL_PRO", "gemini-1.5-pro")
+GEMINI_MODEL_CHAT = os.environ.get("GEMINI_MODEL_CHAT", GEMINI_MODEL_FLASH)
+_gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+
+# GHOSINT — live OSINT search
+GHOSINT_API_KEY = os.environ.get('GHOSINT_API_KEY')
+
+# BOSINT — REST OSINT (ip, domain, phone, discord, steam, email, username, darkweb)
+BOSINT_API_KEY = os.environ.get('BOSINT_API_KEY')
+
+_BOSINT_COMMANDS = {
+    "email": ["email", "darkweb"],
+    "username": ["username", "darkweb"],
+    "phone": ["phone"],
+    "domain": ["domain"],
+    "ip": ["ip"],
+    "wallet": ["darkweb"],
+}
+
+
+async def _search_bosint_command(api_key: str, command: str, query: str):
+    """Call a single BOSINT command. Returns a result dict or None."""
+    try:
+        url = f"https://app.bosint.gg/bosintapi/{api_key}/{command}/{query}"
+        timeout = 90.0 if command == "username" else 30.0
+        async with httpx.AsyncClient(timeout=timeout) as c:
+            resp = await c.get(url)
+        if resp.status_code in (401, 403, 429):
+            logger.debug(f"BOSINT {command}: {resp.status_code}")
+            return None
+        resp.raise_for_status()
+        data = resp.json()
+        if not data.get("success"):
+            logger.debug(f"BOSINT {command}: {data.get('error', 'unknown error')}")
+            return None
+        return {"source": f"bosint/{command}", "data": data.get("data", data), "risk": 0.5}
+    except Exception as e:
+        logger.debug(f"BOSINT {command} failed: {e}")
+        return None
+
+
+async def _search_bosint(query: str, search_type: str) -> list:
+    """Query relevant BOSINT commands in parallel for a search type."""
+    if not BOSINT_API_KEY:
+        return []
+    commands = _BOSINT_COMMANDS.get(search_type, [])
+    if not commands:
+        return []
+    import asyncio
+    tasks = [_search_bosint_command(BOSINT_API_KEY, cmd, query) for cmd in commands]
+    raw = await asyncio.gather(*tasks)
+    return [r for r in raw if r is not None]
+
+
+# Swatted — session-based OSINT (breach, social, recon modules)
+SWATTED_API_TOKEN = os.environ.get('SWATTED_API_TOKEN')
+_swatted_session = None  # (creds_dict, cookies_jar)
+
+
+async def _get_swatted_session():
+    """Exchange account token for session credentials + cookies (cached)."""
+    global _swatted_session
+    if _swatted_session:
+        return _swatted_session
+    if not SWATTED_API_TOKEN:
+        return None
+    async with httpx.AsyncClient(timeout=15.0) as c:
+        r = await c.post(
+            "https://swattedw.tf/api/login_token_api",
+            json={"api_key": SWATTED_API_TOKEN},
+        )
+        r.raise_for_status()
+        data = r.json()
+    if "sessionToken" not in data:
+        logger.error(f"Swatted login failed: {data}")
+        return None
+    creds = {
+        "session": data["sessionToken"],
+        "user_id": data["userID"],
+        "csrf": data["csrfToken"],
+    }
+    cookies = {
+        "sessionToken": data["sessionToken"],
+        "userID": data["userID"],
+        "csrfToken": data["csrfToken"],
+    }
+    _swatted_session = (creds, cookies)
+    logger.info("Swatted session credentials acquired")
+    return _swatted_session
+
+
+def _swatted_headers(creds, with_csrf=False):
+    h = {
+        "Authorization": f"Bearer {creds['session']}",
+        "X-User-ID": creds["user_id"],
+    }
+    if with_csrf:
+        h["X-CSRF-Token"] = creds["csrf"]
+        h["Content-Type"] = "application/json"
+    return h
+
 
 # Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
+
+# Import investigation engine
+from engine import InvestigationEngine  # noqa: E402
+
+# Initialize engine (will be populated with db and osint func after startup)
+investigation_engine = None
+
+# In-memory event queues for SSE streaming per investigation
+import asyncio as _asyncio  # noqa: E402
+_investigation_event_queues: Dict[str, list] = {}  # investigation_id -> list of asyncio.Queue
 
 # Configure logging
 logging.basicConfig(
@@ -62,10 +180,53 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============= API KEY VALIDATION =============
+
+
 async def validate_api_key(x_api_key: Optional[str] = Header(None)):
-    if not x_api_key or x_api_key != API_KEY:
+    if not x_api_key or not hmac.compare_digest(x_api_key, API_KEY):
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
     return True
+
+
+# ============= RATE LIMITING =============
+import time as _time  # noqa: E402
+
+
+class _RateLimiter:
+    """Simple in-memory token-bucket rate limiter keyed by client identifier."""
+
+    def __init__(self):
+        self._buckets: Dict[str, Dict[str, Any]] = {}
+
+    def check(self, key: str, max_requests: int, window_seconds: int) -> bool:
+        """Return True if allowed, False if rate-limited."""
+        now = _time.monotonic()
+        bucket = self._buckets.get(key)
+        if bucket is None or now - bucket["window_start"] >= window_seconds:
+            self._buckets[key] = {"window_start": now, "count": 1}
+            return True
+        if bucket["count"] >= max_requests:
+            return False
+        bucket["count"] += 1
+        return True
+
+
+_rate_limiter = _RateLimiter()
+
+# Limits: AI endpoints = 30 req/min, OSINT = 20 req/min, general = 120 req/min
+_RATE_LIMITS = {
+    "ai": (30, 60),
+    "osint": (20, 60),
+    "general": (120, 60),
+}
+
+
+def _enforce_rate_limit(api_key: str, category: str = "general"):
+    max_req, window = _RATE_LIMITS.get(category, _RATE_LIMITS["general"])
+    bucket_key = f"{api_key}:{category}"
+    if not _rate_limiter.check(bucket_key, max_req, window):
+        raise HTTPException(status_code=429, detail=f"Rate limit exceeded ({max_req} requests per {window}s for {category})")
+
 
 # ============= MODELS =============
 
@@ -81,10 +242,12 @@ class Investigation(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
+
 class InvestigationCreate(BaseModel):
     name: str
     description: str = ""
     tags: List[str] = []
+
 
 class InvestigationUpdate(BaseModel):
     name: Optional[str] = None
@@ -93,29 +256,49 @@ class InvestigationUpdate(BaseModel):
     tags: Optional[List[str]] = None
     status: Optional[str] = None
 
+    @field_validator("status")
+    @classmethod
+    def validate_status(cls, v):
+        if v is not None and v not in ("active", "archived"):
+            raise ValueError("status must be 'active' or 'archived'")
+        return v
+
+
 class Entity(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     investigation_id: str
-    entity_type: str  # person, username, email, phone, domain, ip, company, location, wallet, social, hash, url
+    entity_type: str
     value: str
     label: Optional[str] = None
     metadata: Dict[str, Any] = {}
-    confidence: float = 0.5  # 0-1
-    risk_score: float = 0.0  # 0-1
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    risk_score: float = Field(default=0.0, ge=0.0, le=1.0)
     sources: List[str] = []
     notes: str = ""
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+VALID_ENTITY_TYPES = {"person", "username", "email", "phone", "domain", "ip", "company", "location", "wallet", "social", "hash", "url"}
+
 
 class EntityCreate(BaseModel):
     entity_type: str
     value: str
     label: Optional[str] = None
     metadata: Dict[str, Any] = {}
-    confidence: float = 0.5
-    risk_score: float = 0.0
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    risk_score: float = Field(default=0.0, ge=0.0, le=1.0)
     sources: List[str] = []
     notes: str = ""
+
+    @field_validator("entity_type")
+    @classmethod
+    def validate_entity_type(cls, v):
+        if v not in VALID_ENTITY_TYPES:
+            raise ValueError(f"entity_type must be one of: {', '.join(sorted(VALID_ENTITY_TYPES))}")
+        return v
+
 
 class EntityUpdate(BaseModel):
     """Partial update model for entities — all fields optional."""
@@ -126,6 +309,7 @@ class EntityUpdate(BaseModel):
     risk_score: Optional[float] = None
     sources: Optional[List[str]] = None
     notes: Optional[str] = None
+
 
 class Relationship(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -139,6 +323,7 @@ class Relationship(BaseModel):
     confidence: float = 0.5
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
+
 class RelationshipCreate(BaseModel):
     source_entity_id: str
     target_entity_id: str
@@ -146,6 +331,7 @@ class RelationshipCreate(BaseModel):
     label: str = ""
     metadata: Dict[str, Any] = {}
     confidence: float = 0.5
+
 
 class TimelineEvent(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -156,6 +342,7 @@ class TimelineEvent(BaseModel):
     description: str
     metadata: Dict[str, Any] = {}
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
 
 class Evidence(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -170,6 +357,10 @@ class Evidence(BaseModel):
     verification_status: str = "unverified"  # verified, unverified, disputed
     collected_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
+
+VALID_VERIFICATION_STATUSES = {"verified", "unverified", "disputed"}
+
+
 class EvidenceCreate(BaseModel):
     entity_id: Optional[str] = None
     evidence_type: str
@@ -179,12 +370,28 @@ class EvidenceCreate(BaseModel):
     tags: List[str] = []
     verification_status: str = "unverified"
 
+    @field_validator("verification_status")
+    @classmethod
+    def validate_verification_status(cls, v):
+        if v not in VALID_VERIFICATION_STATUSES:
+            raise ValueError(f"verification_status must be one of: {', '.join(sorted(VALID_VERIFICATION_STATUSES))}")
+        return v
+
+
 class EvidenceUpdate(BaseModel):
     """Partial update model for evidence — all fields optional."""
     notes: Optional[str] = None
     tags: Optional[List[str]] = None
     verification_status: Optional[str] = None
     entity_id: Optional[str] = None
+
+    @field_validator("verification_status")
+    @classmethod
+    def validate_verification_status(cls, v):
+        if v is not None and v not in VALID_VERIFICATION_STATUSES:
+            raise ValueError(f"verification_status must be one of: {', '.join(sorted(VALID_VERIFICATION_STATUSES))}")
+        return v
+
 
 class AISuggestion(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -197,27 +404,33 @@ class AISuggestion(BaseModel):
     status: str = "pending"  # pending, accepted, dismissed
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
+
 class AIAnalysisRequest(BaseModel):
     investigation_id: str
     mode: str = "flash"  # flash or pro
     context: Optional[str] = None
 
+
 class OSINTSearchRequest(BaseModel):
     query: str
     search_type: str  # email, username, domain, ip, phone, wallet
 
+
 class EntityExtractionRequest(BaseModel):
     text: str
     source_evidence_id: Optional[str] = None
+
 
 class EnrichmentRequest(BaseModel):
     entity_id: str
     entity_type: str
     entity_value: str
 
+
 class GraphAnalysisRequest(BaseModel):
     investigation_id: str
     analysis_type: str = "full"  # full, clusters, centrality, paths
+
 
 class InvestigationLead(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -237,6 +450,7 @@ class InvestigationLead(BaseModel):
 
 # ============= AI CHAT MODELS =============
 
+
 class ChatMessage(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -246,19 +460,23 @@ class ChatMessage(BaseModel):
     content: str
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
+
 class ChatRequest(BaseModel):
     message: str
     session_id: Optional[str] = None
+
 
 class EntityMergeRequest(BaseModel):
     """Request to merge two entity records into one, keeping the primary entity."""
     primary_entity_id: str   # Entity to keep
     duplicate_entity_id: str  # Entity to remove; its relationships are re-parented to primary
 
+
 class URLIngestRequest(BaseModel):
     url: str
     evidence_type: str = "webpage"
     notes: str = ""
+
 
 class RawTextIngestRequest(BaseModel):
     content: str
@@ -267,6 +485,7 @@ class RawTextIngestRequest(BaseModel):
     notes: str = ""
 
 # ============= EXPANDED EVIDENCE CATEGORIES =============
+
 
 EVIDENCE_CATEGORIES = {
     "web": {
@@ -401,7 +620,11 @@ ENTITY_PATTERNS = {
         "risk_base": 0.3
     },
     "domain": {
-        "compiled": re.compile(r'(?<![/@])(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+(?:onion|com|net|org|io|co|info|biz|gov|edu|mil|int|xyz|online|site|tech|dev|app|cloud|ru|cn|uk|de|fr|jp|br|in|au|nl|se|ch|es|it|pl|cz|ro|hu|bg|ua|kz|by)', re.IGNORECASE),
+        "compiled": re.compile(
+            r'(?<![/@])(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)'
+            r'+(?:onion|com|net|org|io|co|info|biz|gov|edu|mil|int|xyz|online|site|tech|'
+            r'dev|app|cloud|ru|cn|uk|de|fr|jp|br|in|au|nl|se|ch|es|it|pl|cz|ro|hu|bg|ua|kz|by)',
+            re.IGNORECASE),
         "label": "Domain",
         "entity_type": "domain",
         "risk_base": 0.4
@@ -419,7 +642,9 @@ ENTITY_PATTERNS = {
         "risk_base": 0.3
     },
     "ip_v6": {
-        "compiled": re.compile(r'(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|(?:[0-9a-fA-F]{1,4}:){1,7}:|(?:[0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}', re.IGNORECASE),
+        "compiled": re.compile(
+            r'(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|(?:[0-9a-fA-F]{1,4}:){1,7}:|(?:[0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}',
+            re.IGNORECASE),
         "label": "IPv6 Address",
         "entity_type": "ip",
         "risk_base": 0.3
@@ -500,6 +725,29 @@ ENTITY_PATTERNS = {
 
 # ============= CONTENT EXTRACTION FUNCTIONS =============
 
+
+def validate_url_for_ssrf(url: str) -> None:
+    """Reject URLs targeting private/internal networks to prevent SSRF."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"Unsupported URL scheme: {parsed.scheme}")
+    hostname = parsed.hostname
+    if not hostname:
+        raise ValueError("Missing hostname in URL")
+    blocked_hosts = {"localhost", "127.0.0.1", "::1", "0.0.0.0", "[::1]"}
+    if hostname.lower() in blocked_hosts or hostname.lower().endswith(".local") or hostname.lower().endswith(".internal"):
+        raise ValueError("URLs targeting localhost or internal hosts are not allowed")
+    try:
+        addr = ipaddress.ip_address(hostname)
+        if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved:
+            raise ValueError("URLs targeting private or reserved IP addresses are not allowed")
+    except ValueError as ip_err:
+        if "not allowed" in str(ip_err):
+            raise
+        # hostname is a DNS name, not an IP literal — that's fine
+        pass
+
+
 async def fetch_url_content(url: str) -> Dict[str, Any]:
     """Fetch and parse content from a URL"""
     result = {
@@ -509,57 +757,59 @@ async def fetch_url_content(url: str) -> Dict[str, Any]:
         "metadata": {},
         "error": None
     }
-    
+
     try:
+        validate_url_for_ssrf(url)
         async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
             response = await client.get(url, headers={
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
             })
             response.raise_for_status()
-            
+
             content_type = response.headers.get("content-type", "").lower()
-            
+
             if "text/html" in content_type and BS4_AVAILABLE:
                 soup = BeautifulSoup(response.text, "lxml")
-                
+
                 # Remove script and style elements
                 for script in soup(["script", "style", "nav", "footer", "header"]):
                     script.decompose()
-                
+
                 # Get title
                 title_tag = soup.find("title")
                 result["title"] = title_tag.get_text().strip() if title_tag else url
-                
+
                 # Get meta description
                 meta_desc = soup.find("meta", {"name": "description"})
                 if meta_desc:
                     result["metadata"]["description"] = meta_desc.get("content", "")
-                
+
                 # Get main content text
                 result["content"] = soup.get_text(separator=" ", strip=True)[:50000]  # Limit size
                 result["success"] = True
-                
+
             elif "application/json" in content_type:
                 result["content"] = response.text
                 result["title"] = "JSON Data"
                 result["success"] = True
-                
+
             else:
                 result["content"] = response.text[:50000]
                 result["title"] = url
                 result["success"] = True
-                
+
     except Exception as e:
         result["error"] = str(e)
         logger.error(f"Failed to fetch URL {url}: {e}")
-    
+
     return result
+
 
 def extract_text_from_pdf(pdf_bytes: bytes) -> str:
     """Extract text from a PDF file"""
     if not PDF_AVAILABLE:
         return ""
-    
+
     try:
         reader = PdfReader(BytesIO(pdf_bytes))
         text_content = []
@@ -572,11 +822,12 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> str:
         logger.error(f"PDF extraction failed: {e}")
         return ""
 
+
 def extract_text_from_image(image_bytes: bytes) -> str:
     """Extract text from an image using OCR"""
     if not OCR_AVAILABLE:
         return ""
-    
+
     try:
         image = Image.open(BytesIO(image_bytes))
         text = pytesseract.image_to_string(image)
@@ -585,41 +836,42 @@ def extract_text_from_image(image_bytes: bytes) -> str:
         logger.error(f"OCR extraction failed: {e}")
         return ""
 
+
 def extract_entities_from_text(text: str, source_evidence_id: Optional[str] = None) -> List[Dict[str, Any]]:
     """Extract all entities/indicators from text using regex patterns"""
     extracted = []
     seen_values = set()  # Deduplicate
-    
+
     for pattern_name, config in ENTITY_PATTERNS.items():
         try:
             matches = config["compiled"].findall(text)
-            
+
             for match in matches:
                 # Handle tuple matches from groups
                 if isinstance(match, tuple):
                     match = match[0] if match else ""
-                
+
                 clean_value = match.strip()
                 if not clean_value or len(clean_value) < 3:
                     continue
-                
+
                 # Skip common false positives
                 if clean_value.lower() in ["www", "http", "https", "ftp", "mail"]:
                     continue
-                
+
                 # Deduplicate
                 dedup_key = f"{config['entity_type']}:{clean_value.lower()}"
                 if dedup_key in seen_values:
                     continue
                 seen_values.add(dedup_key)
-                
+
                 # Calculate risk score
                 risk_score = config.get("risk_base", 0.3)
                 if ".onion" in clean_value.lower():
                     risk_score = max(risk_score, 0.8)
                 if pattern_name.startswith("wallet_"):
                     risk_score = max(risk_score, 0.5)
-                
+
                 extracted.append({
                     "type": config["entity_type"],
                     "pattern_match": pattern_name,
@@ -632,22 +884,24 @@ def extract_entities_from_text(text: str, source_evidence_id: Optional[str] = No
         except re.error as e:
             logger.error(f"Regex error for pattern {pattern_name}: {e}")
             continue
-    
+
     # Sort by risk score (highest first)
     extracted.sort(key=lambda x: x.get("risk_score", 0), reverse=True)
-    
+
     return extracted
 
 # ============= MOCK ENRICHMENT DATA =============
+
+
 def generate_mock_enrichment(entity_type: str, entity_value: str) -> Dict[str, Any]:
     """Generate realistic mock enrichment data based on entity type"""
     import hashlib
     import random
-    
+
     # Use hash for deterministic but varied results
     seed = int(hashlib.md5(entity_value.encode()).hexdigest()[:8], 16)
     random.seed(seed)
-    
+
     base_enrichment = {
         "entity_value": entity_value,
         "entity_type": entity_type,
@@ -656,7 +910,7 @@ def generate_mock_enrichment(entity_type: str, entity_value: str) -> Dict[str, A
         "intelligence": {},
         "risk_assessment": {}
     }
-    
+
     if entity_type == "email":
         breach_count = random.randint(0, 7)
         base_enrichment["sources_checked"] = ["HaveIBeenPwned", "DeHashed", "IntelX", "Snusbase"]
@@ -684,7 +938,7 @@ def generate_mock_enrichment(entity_type: str, entity_value: str) -> Dict[str, A
             ]
         }
         base_enrichment["risk_assessment"]["factors"] = [f for f in base_enrichment["risk_assessment"]["factors"] if f]
-        
+
     elif entity_type == "domain":
         is_onion = ".onion" in entity_value
         base_enrichment["sources_checked"] = ["WHOIS", "SecurityTrails", "VirusTotal", "URLScan"]
@@ -722,7 +976,7 @@ def generate_mock_enrichment(entity_type: str, entity_value: str) -> Dict[str, A
             ]
         }
         base_enrichment["risk_assessment"]["factors"] = [f for f in base_enrichment["risk_assessment"]["factors"] if f]
-        
+
     elif entity_type == "wallet":
         is_eth = entity_value.startswith("0x")
         tx_count = random.randint(5, 200)
@@ -771,7 +1025,7 @@ def generate_mock_enrichment(entity_type: str, entity_value: str) -> Dict[str, A
             ]
         }
         base_enrichment["risk_assessment"]["factors"] = [f for f in base_enrichment["risk_assessment"]["factors"] if f]
-        
+
     elif entity_type == "ip":
         base_enrichment["sources_checked"] = ["IPInfo", "AbuseIPDB", "Shodan", "VirusTotal"]
         base_enrichment["intelligence"] = {
@@ -804,7 +1058,7 @@ def generate_mock_enrichment(entity_type: str, entity_value: str) -> Dict[str, A
             ]
         }
         base_enrichment["risk_assessment"]["factors"] = [f for f in base_enrichment["risk_assessment"]["factors"] if f]
-    
+
     elif entity_type == "person":
         base_enrichment["sources_checked"] = ["Social Media", "Public Records", "News Archives"]
         base_enrichment["intelligence"] = {
@@ -824,11 +1078,11 @@ def generate_mock_enrichment(entity_type: str, entity_value: str) -> Dict[str, A
             "level": "LOW",
             "factors": []
         }
-    
+
     else:
         base_enrichment["intelligence"] = {"note": "Limited enrichment available for this entity type"}
         base_enrichment["risk_assessment"] = {"score": 0.3, "level": "UNKNOWN", "factors": []}
-    
+
     return base_enrichment
 
 
@@ -842,23 +1096,23 @@ def analyze_graph_intelligence(entities: List[Dict], relationships: List[Dict]) 
             "shortest_paths": [],
             "summary": "No entities to analyze"
         }
-    
+
     # Build adjacency list
     entity_map = {e["id"]: e for e in entities}
     adjacency = {e["id"]: [] for e in entities}
-    
+
     for rel in relationships:
         source = rel.get("source_entity_id")
         target = rel.get("target_entity_id")
         if source in adjacency and target in adjacency:
             adjacency[source].append(target)
             adjacency[target].append(source)
-    
+
     # Calculate degree centrality
     centrality_scores = {}
     for entity_id, connections in adjacency.items():
         centrality_scores[entity_id] = len(connections)
-    
+
     # Find central nodes (top 3 by connections)
     central_nodes = []
     sorted_by_centrality = sorted(centrality_scores.items(), key=lambda x: x[1], reverse=True)
@@ -872,11 +1126,11 @@ def analyze_graph_intelligence(entities: List[Dict], relationships: List[Dict]) 
                 "connection_count": degree,
                 "importance": "high" if degree >= 3 else "medium"
             })
-    
+
     # Detect clusters using iterative BFS (avoids stack overflow on large graphs)
     visited = set()
     clusters = []
-    
+
     for entity_id in adjacency:
         if entity_id not in visited:
             cluster = []
@@ -905,10 +1159,10 @@ def analyze_graph_intelligence(entities: List[Dict], relationships: List[Dict]) 
                     ],
                     "cohesion": "tight" if len(cluster) <= 4 else "loose"
                 })
-    
+
     # Detect suspicious patterns
     suspicious_patterns = []
-    
+
     # Pattern 1: High-risk entity clusters
     for cluster in clusters:
         high_risk_types = {"wallet", "domain"}
@@ -917,10 +1171,13 @@ def analyze_graph_intelligence(entities: List[Dict], relationships: List[Dict]) 
             suspicious_patterns.append({
                 "type": "high_risk_cluster",
                 "severity": "high",
-                "description": f"Cluster contains {', '.join(cluster_types & high_risk_types)} entities that may indicate financial or infrastructure connections",
+                "description": (
+                    f"Cluster contains {', '.join(cluster_types & high_risk_types)} "
+                    "entities that may indicate financial or infrastructure connections"
+                ),
                 "affected_entities": [e["id"] for e in cluster["entities"]]
             })
-    
+
     # Pattern 2: Hub entities (many connections)
     for entity_id, degree in centrality_scores.items():
         if degree >= 3 and entity_id in entity_map:
@@ -929,10 +1186,13 @@ def analyze_graph_intelligence(entities: List[Dict], relationships: List[Dict]) 
                 suspicious_patterns.append({
                     "type": "hub_entity",
                     "severity": "medium",
-                    "description": f"Entity '{entity.get('label') or entity.get('value')}' connects multiple entities - potential key actor or infrastructure",
+                    "description": (
+                        f"Entity '{entity.get('label') or entity.get('value')}' "
+                        "connects multiple entities - potential key actor or infrastructure"
+                    ),
                     "affected_entities": [entity_id] + adjacency[entity_id]
                 })
-    
+
     # Find interesting paths (between high-risk entities)
     shortest_paths = []
     high_risk_entities = [e for e in entities if e.get("entity_type") in ["wallet", "person"]]
@@ -953,7 +1213,7 @@ def analyze_graph_intelligence(entities: List[Dict], relationships: List[Dict]) 
                         visited_paths.add(neighbor)
                         queue.append(path + [neighbor])
             return None
-        
+
         for i, e1 in enumerate(high_risk_entities[:3]):
             for e2 in high_risk_entities[i+1:3]:
                 path = find_path(e1["id"], e2["id"])
@@ -968,7 +1228,7 @@ def analyze_graph_intelligence(entities: List[Dict], relationships: List[Dict]) 
                             for e in path_entities if e
                         ]
                     })
-    
+
     return {
         "clusters": clusters,
         "central_nodes": central_nodes,
@@ -991,18 +1251,18 @@ def generate_investigation_leads(entities: List[Dict], relationships: List[Dict]
     and produces actionable investigative leads.
     """
     from collections import defaultdict
-    
+
     leads = []
-    
+
     if not entities:
         return leads
-    
+
     # Build lookup structures
     entity_map = {e["id"]: e for e in entities}
     entities_by_type = defaultdict(list)
     for e in entities:
         entities_by_type[e.get("entity_type", "unknown")].append(e)
-    
+
     # Build adjacency for relationship analysis
     adjacency = defaultdict(list)
     relationship_map = defaultdict(list)
@@ -1014,12 +1274,12 @@ def generate_investigation_leads(entities: List[Dict], relationships: List[Dict]
             adjacency[target].append(source)
             relationship_map[source].append(rel)
             relationship_map[target].append(rel)
-    
+
     # ============= PATTERN 1: Shared Domain Cluster =============
     # If multiple emails connect to the same domain
     emails = entities_by_type.get("email", [])
     domains = entities_by_type.get("domain", [])
-    
+
     if emails and domains:
         # Pre-build email-by-domain lookup for O(1) access instead of O(emails × domains)
         emails_by_domain = defaultdict(list)
@@ -1028,7 +1288,7 @@ def generate_investigation_leads(entities: List[Dict], relationships: List[Dict]
             if "@" in email_value:
                 email_domain = email_value.split("@")[1].lower()
                 emails_by_domain[email_domain].append(email)
-        
+
         for domain in domains:
             domain_value = domain.get("value", "")
             # Get emails matching by domain name (O(1) lookup)
@@ -1038,13 +1298,17 @@ def generate_investigation_leads(entities: List[Dict], relationships: List[Dict]
             for email in emails:
                 if email["id"] not in connected_ids and email["id"] in adjacency.get(domain["id"], []):
                     connected_emails.append(email)
-            
+
             if len(connected_emails) >= 2:
                 leads.append({
                     "id": f"lead_{uuid.uuid4().hex[:12]}",
                     "lead_type": "alias_cluster",
                     "title": "Possible Operator Cluster Detected",
-                    "description": f"Multiple email addresses ({len(connected_emails)}) are associated with the domain {domain_value}. This may indicate a single operator using multiple aliases or an organized group.",
+                    "description": (
+                        f"Multiple email addresses ({len(connected_emails)}) are associated "
+                        f"with the domain {domain_value}. This may indicate a single operator "
+                        "using multiple aliases or an organized group."
+                    ),
                     "confidence": min(0.95, 0.5 + len(connected_emails) * 0.15),
                     "severity": "high" if len(connected_emails) >= 3 else "medium",
                     "affected_entities": [e["id"] for e in connected_emails] + [domain["id"]],
@@ -1060,11 +1324,11 @@ def generate_investigation_leads(entities: List[Dict], relationships: List[Dict]
                         "email_count": len(connected_emails)
                     }
                 })
-    
+
     # ============= PATTERN 2: Wallet Cluster Analysis =============
     # Wallets that interact with the same exchanges or each other
     wallets = entities_by_type.get("wallet", [])
-    
+
     if len(wallets) >= 2:
         # Find wallets connected through common entities
         wallet_connections = defaultdict(set)
@@ -1073,7 +1337,7 @@ def generate_investigation_leads(entities: List[Dict], relationships: List[Dict]
                 connected_entity = entity_map.get(connected_id)
                 if connected_entity:
                     wallet_connections[wallet["id"]].add(connected_id)
-        
+
         # Find wallet pairs with shared connections
         wallet_list = list(wallets)
         for i, w1 in enumerate(wallet_list):
@@ -1085,7 +1349,12 @@ def generate_investigation_leads(entities: List[Dict], relationships: List[Dict]
                         "id": f"lead_{uuid.uuid4().hex[:12]}",
                         "lead_type": "wallet_cluster",
                         "title": "Wallet Cluster Detected",
-                        "description": f"Wallets '{w1.get('label') or w1.get('value')[:12]}...' and '{w2.get('label') or w2.get('value')[:12]}...' share {len(shared)} common connection(s). This may indicate fund movement coordination or common ownership.",
+                        "description": (
+                            f"Wallets '{w1.get('label') or w1.get('value')[:12]}...' and "
+                            f"'{w2.get('label') or w2.get('value')[:12]}...' share "
+                            f"{len(shared)} common connection(s). This may indicate fund "
+                            "movement coordination or common ownership."
+                        ),
                         "confidence": min(0.90, 0.6 + len(shared) * 0.1),
                         "severity": "high",
                         "affected_entities": [w1["id"], w2["id"]] + list(shared),
@@ -1101,7 +1370,7 @@ def generate_investigation_leads(entities: List[Dict], relationships: List[Dict]
                             "shared_connections": [e.get("value") for e in shared_entities]
                         }
                     })
-    
+
     # ============= PATTERN 3: Infrastructure Correlation =============
     # Domains sharing hosting or registration patterns
     if len(domains) >= 2:
@@ -1113,16 +1382,20 @@ def generate_investigation_leads(entities: List[Dict], relationships: List[Dict]
                 d1_connections = set(adjacency.get(d1["id"], []))
                 d2_connections = set(adjacency.get(d2["id"], []))
                 shared_infra = d1_connections & d2_connections
-                
+
                 # Check for .onion domains (high risk)
                 both_onion = ".onion" in d1.get("value", "") and ".onion" in d2.get("value", "")
-                
+
                 if shared_infra or both_onion:
                     leads.append({
                         "id": f"lead_{uuid.uuid4().hex[:12]}",
                         "lead_type": "shared_infrastructure",
                         "title": "Shared Infrastructure Pattern",
-                        "description": f"Domains '{d1.get('value')}' and '{d2.get('value')}' appear to share infrastructure or operator connections. {'Both are Tor hidden services.' if both_onion else ''}",
+                        "description": (
+                            f"Domains '{d1.get('value')}' and '{d2.get('value')}' appear "
+                            "to share infrastructure or operator connections. "
+                            f"{'Both are Tor hidden services.' if both_onion else ''}"
+                        ),
                         "confidence": 0.75 if both_onion else 0.65,
                         "severity": "high" if both_onion else "medium",
                         "affected_entities": [d1["id"], d2["id"]],
@@ -1138,19 +1411,19 @@ def generate_investigation_leads(entities: List[Dict], relationships: List[Dict]
                             "both_onion": both_onion
                         }
                     })
-    
+
     # ============= PATTERN 4: Username/Alias Reuse =============
     # Same or similar usernames across entities
     usernames = entities_by_type.get("username", [])
     persons = entities_by_type.get("person", [])
-    
+
     # Extract potential usernames from emails
     email_usernames = []
     for email in emails:
         if "@" in email.get("value", ""):
             username_part = email["value"].split("@")[0].lower()
             email_usernames.append({"username": username_part, "source": email})
-    
+
     # Check for reuse patterns
     username_values = [u.get("value", "").lower() for u in usernames]
     for eu in email_usernames:
@@ -1161,7 +1434,12 @@ def generate_investigation_leads(entities: List[Dict], relationships: List[Dict]
                     "id": f"lead_{uuid.uuid4().hex[:12]}",
                     "lead_type": "username_reuse",
                     "title": "Username Reuse Pattern Detected",
-                    "description": f"The username pattern '{eu['username']}' appears in both email '{eu['source'].get('value')}' and social handle '{matching_username.get('value')}'. This strongly suggests the same individual.",
+                    "description": (
+                        f"The username pattern '{eu['username']}' appears in both email "
+                        f"'{eu['source'].get('value')}' and social handle "
+                        f"'{matching_username.get('value')}'. This strongly suggests "
+                        "the same individual."
+                    ),
                     "confidence": 0.85,
                     "severity": "medium",
                     "affected_entities": [eu["source"]["id"], matching_username["id"]],
@@ -1177,13 +1455,13 @@ def generate_investigation_leads(entities: List[Dict], relationships: List[Dict]
                         "social_handle": matching_username.get("value")
                     }
                 })
-    
+
     # ============= PATTERN 5: High-Risk Entity Connections =============
     # Person connected to multiple high-risk entities
     for person in persons:
         person_connections = adjacency.get(person["id"], [])
         high_risk_connections = []
-        
+
         for conn_id in person_connections:
             connected = entity_map.get(conn_id)
             if connected and connected.get("entity_type") in ["wallet", "domain"]:
@@ -1191,13 +1469,18 @@ def generate_investigation_leads(entities: List[Dict], relationships: List[Dict]
                 value = connected.get("value", "")
                 if ".onion" in value or connected.get("entity_type") == "wallet":
                     high_risk_connections.append(connected)
-        
+
         if len(high_risk_connections) >= 2:
             leads.append({
                 "id": f"lead_{uuid.uuid4().hex[:12]}",
                 "lead_type": "high_risk_connection",
                 "title": "High-Risk Entity Network",
-                "description": f"Individual '{person.get('label') or person.get('value')}' is connected to {len(high_risk_connections)} high-risk entities including wallets and/or dark web domains. This may indicate involvement in suspicious activities.",
+                "description": (
+                    f"Individual '{person.get('label') or person.get('value')}' is connected "
+                    f"to {len(high_risk_connections)} high-risk entities including wallets "
+                    "and/or dark web domains. This may indicate involvement in "
+                    "suspicious activities."
+                ),
                 "confidence": min(0.90, 0.55 + len(high_risk_connections) * 0.15),
                 "severity": "critical" if len(high_risk_connections) >= 3 else "high",
                 "affected_entities": [person["id"]] + [e["id"] for e in high_risk_connections],
@@ -1213,7 +1496,7 @@ def generate_investigation_leads(entities: List[Dict], relationships: List[Dict]
                     "high_risk_types": list(set(e.get("entity_type") for e in high_risk_connections))
                 }
             })
-    
+
     # ============= PATTERN 6: Timing Anomaly Detection =============
     # Evidence/entities added in suspicious patterns
     if len(timeline) >= 3:
@@ -1224,11 +1507,11 @@ def generate_investigation_leads(entities: List[Dict], relationships: List[Dict]
             if isinstance(ts, str):
                 try:
                     timestamps.append(datetime.fromisoformat(ts.replace("Z", "+00:00")))
-                except:
+                except (ValueError, TypeError):
                     pass
             elif isinstance(ts, datetime):
                 timestamps.append(ts)
-        
+
         if len(timestamps) >= 3:
             timestamps.sort()
             # Check for rapid succession (within 5 minutes)
@@ -1237,13 +1520,18 @@ def generate_investigation_leads(entities: List[Dict], relationships: List[Dict]
                 diff = (timestamps[i] - timestamps[i-1]).total_seconds()
                 if diff < 300:  # 5 minutes
                     burst_events.append(i)
-            
+
             if len(burst_events) >= 3:
                 leads.append({
                     "id": f"lead_{uuid.uuid4().hex[:12]}",
                     "lead_type": "timing_anomaly",
                     "title": "Activity Burst Detected",
-                    "description": f"Multiple investigation events ({len(burst_events)+1}) occurred in rapid succession. This may indicate automated data dumps, coordinated activity, or a significant event window worth focusing on.",
+                    "description": (
+                        f"Multiple investigation events ({len(burst_events)+1}) occurred "
+                        "in rapid succession. This may indicate automated data dumps, "
+                        "coordinated activity, or a significant event window worth "
+                        "focusing on."
+                    ),
                     "confidence": 0.70,
                     "severity": "medium",
                     "affected_entities": [],
@@ -1257,7 +1545,7 @@ def generate_investigation_leads(entities: List[Dict], relationships: List[Dict]
                         "time_window": "5 minutes"
                     }
                 })
-    
+
     # ============= PATTERN 7: Missing Connection Hypothesis =============
     # Suggest connections that might exist based on entity proximity
     unconnected_pairs = []
@@ -1267,12 +1555,12 @@ def generate_investigation_leads(entities: List[Dict], relationships: List[Dict]
             # Skip if already connected
             if e2["id"] in adjacency.get(e1["id"], []):
                 continue
-            
+
             # Check if they share a common neighbor
             e1_neighbors = set(adjacency.get(e1["id"], []))
             e2_neighbors = set(adjacency.get(e2["id"], []))
             common_neighbors = e1_neighbors & e2_neighbors
-            
+
             if common_neighbors and len(common_neighbors) >= 1:
                 # They're two hops apart - suggest investigation
                 common_entities = [entity_map.get(n) for n in common_neighbors if n in entity_map]
@@ -1282,14 +1570,19 @@ def generate_investigation_leads(entities: List[Dict], relationships: List[Dict]
                         "e2": e2,
                         "via": common_entities[0]
                     })
-    
+
     # Generate leads for most interesting unconnected pairs
     for pair in unconnected_pairs[:2]:  # Limit to top 2
         leads.append({
             "id": f"lead_{uuid.uuid4().hex[:12]}",
             "lead_type": "missing_connection",
             "title": "Potential Hidden Connection",
-            "description": f"'{pair['e1'].get('label') or pair['e1'].get('value')}' and '{pair['e2'].get('label') or pair['e2'].get('value')}' are both connected to '{pair['via'].get('label') or pair['via'].get('value')}' but not to each other. Investigate whether a direct relationship exists.",
+            "description": (
+                f"'{pair['e1'].get('label') or pair['e1'].get('value')}' and "
+                f"'{pair['e2'].get('label') or pair['e2'].get('value')}' are both "
+                f"connected to '{pair['via'].get('label') or pair['via'].get('value')}' "
+                "but not to each other. Investigate whether a direct relationship exists."
+            ),
             "confidence": 0.55,
             "severity": "low",
             "affected_entities": [pair["e1"]["id"], pair["e2"]["id"], pair["via"]["id"]],
@@ -1304,31 +1597,34 @@ def generate_investigation_leads(entities: List[Dict], relationships: List[Dict]
                 "connecting_entity": pair["via"].get("value")
             }
         })
-    
+
     # Sort leads by confidence and severity
     severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
     leads.sort(key=lambda x: (severity_order.get(x["severity"], 4), -x["confidence"]))
-    
+
     # Add default status to all leads
     for lead in leads:
         lead["status"] = "new"
-    
+
     return leads
 
 # ============= HELPER FUNCTIONS =============
 
-async def create_timeline_event(investigation_id: str, event_type: str, description: str, entity_id: Optional[str] = None, metadata: Dict = {}):
+
+async def create_timeline_event(investigation_id: str, event_type: str, description: str,
+                                entity_id: Optional[str] = None, metadata: Optional[Dict] = None):
     event = TimelineEvent(
         investigation_id=investigation_id,
         event_type=event_type,
         description=description,
         entity_id=entity_id,
-        metadata=metadata
+        metadata=metadata or {}
     )
     doc = event.model_dump()
     doc['timestamp'] = doc['timestamp'].isoformat()
     await db.timeline_events.insert_one(doc)
     return event
+
 
 def serialize_datetime(obj):
     if isinstance(obj, dict):
@@ -1341,99 +1637,108 @@ def serialize_datetime(obj):
 
 # ============= ROUTES =============
 
+
 @api_router.get("/")
-async def root():
+async def root(x_api_key: str = Header(None)):
+    await validate_api_key(x_api_key)
     return {"message": "Trace Analyst API v1.0", "status": "operational"}
+
 
 @api_router.post("/auth/validate")
 async def validate_key(x_api_key: str = Header(None)):
-    if x_api_key == API_KEY:
+    if x_api_key and hmac.compare_digest(x_api_key, API_KEY):
         return {"valid": True, "message": "API key is valid"}
-    return {"valid": False, "message": "Invalid API key"}
+    raise HTTPException(status_code=401, detail="Invalid API key")
 
 # ============= INVESTIGATIONS =============
+
 
 @api_router.post("/investigations", response_model=Investigation)
 async def create_investigation(input: InvestigationCreate, x_api_key: str = Header(None)):
     await validate_api_key(x_api_key)
-    
+
     investigation = Investigation(
         name=input.name,
         description=input.description,
         tags=input.tags
     )
-    
+
     doc = serialize_datetime(investigation.model_dump())
     await db.investigations.insert_one(doc)
-    
+
     await create_timeline_event(
         investigation.id,
         "investigation_created",
         f"Investigation '{investigation.name}' created"
     )
-    
+
     return investigation
 
-@api_router.get("/investigations", response_model=List[Investigation])
-async def get_investigations(x_api_key: str = Header(None)):
+
+@api_router.get("/investigations")
+async def get_investigations(x_api_key: str = Header(None), skip: int = 0, limit: int = 100):
     await validate_api_key(x_api_key)
-    
-    investigations = await db.investigations.find({}, {"_id": 0}).to_list(1000)
+    limit = min(limit, 500)
+
+    investigations = await db.investigations.find({}, {"_id": 0}).skip(skip).limit(limit).to_list(limit)
     for inv in investigations:
         if isinstance(inv.get('created_at'), str):
             inv['created_at'] = datetime.fromisoformat(inv['created_at'])
         if isinstance(inv.get('updated_at'), str):
             inv['updated_at'] = datetime.fromisoformat(inv['updated_at'])
-    
+
     return investigations
+
 
 @api_router.get("/investigations/{investigation_id}", response_model=Investigation)
 async def get_investigation(investigation_id: str, x_api_key: str = Header(None)):
     await validate_api_key(x_api_key)
-    
+
     investigation = await db.investigations.find_one({"id": investigation_id}, {"_id": 0})
     if not investigation:
         raise HTTPException(status_code=404, detail="Investigation not found")
-    
+
     if isinstance(investigation.get('created_at'), str):
         investigation['created_at'] = datetime.fromisoformat(investigation['created_at'])
     if isinstance(investigation.get('updated_at'), str):
         investigation['updated_at'] = datetime.fromisoformat(investigation['updated_at'])
-    
+
     return investigation
+
 
 @api_router.patch("/investigations/{investigation_id}", response_model=Investigation)
 async def update_investigation(investigation_id: str, input: InvestigationUpdate, x_api_key: str = Header(None)):
     await validate_api_key(x_api_key)
-    
+
     investigation = await db.investigations.find_one({"id": investigation_id}, {"_id": 0})
     if not investigation:
         raise HTTPException(status_code=404, detail="Investigation not found")
-    
+
     update_data = input.model_dump(exclude_unset=True)
     update_data['updated_at'] = datetime.now(timezone.utc).isoformat()
-    
+
     await db.investigations.update_one(
         {"id": investigation_id},
         {"$set": update_data}
     )
-    
+
     updated_inv = await db.investigations.find_one({"id": investigation_id}, {"_id": 0})
     if isinstance(updated_inv.get('created_at'), str):
         updated_inv['created_at'] = datetime.fromisoformat(updated_inv['created_at'])
     if isinstance(updated_inv.get('updated_at'), str):
         updated_inv['updated_at'] = datetime.fromisoformat(updated_inv['updated_at'])
-    
+
     return updated_inv
+
 
 @api_router.delete("/investigations/{investigation_id}")
 async def delete_investigation(investigation_id: str, x_api_key: str = Header(None)):
     await validate_api_key(x_api_key)
-    
+
     result = await db.investigations.delete_one({"id": investigation_id})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Investigation not found")
-    
+
     # Clean up related data
     await db.entities.delete_many({"investigation_id": investigation_id})
     await db.relationships.delete_many({"investigation_id": investigation_id})
@@ -1442,65 +1747,70 @@ async def delete_investigation(investigation_id: str, x_api_key: str = Header(No
     await db.ai_suggestions.delete_many({"investigation_id": investigation_id})
     await db.investigation_leads.delete_many({"investigation_id": investigation_id})
     await db.chat_messages.delete_many({"investigation_id": investigation_id})
-    
+
     return {"success": True, "message": "Investigation and all related data deleted"}
 
 # ============= ENTITIES =============
 
+
 @api_router.post("/investigations/{investigation_id}/entities", response_model=Entity)
 async def create_entity(investigation_id: str, input: EntityCreate, x_api_key: str = Header(None)):
     await validate_api_key(x_api_key)
-    
+
     entity = Entity(
         investigation_id=investigation_id,
         **input.model_dump()
     )
-    
+
     doc = serialize_datetime(entity.model_dump())
     await db.entities.insert_one(doc)
-    
+
     await create_timeline_event(
         investigation_id,
         "entity_added",
         f"Added {entity.entity_type}: {entity.value}",
         entity_id=entity.id
     )
-    
+
     return entity
 
-@api_router.get("/investigations/{investigation_id}/entities", response_model=List[Entity])
-async def get_entities(investigation_id: str, x_api_key: str = Header(None)):
+
+@api_router.get("/investigations/{investigation_id}/entities")
+async def get_entities(investigation_id: str, x_api_key: str = Header(None), skip: int = 0, limit: int = 500):
     await validate_api_key(x_api_key)
-    
-    entities = await db.entities.find({"investigation_id": investigation_id}, {"_id": 0}).to_list(1000)
+    limit = min(limit, 2000)
+
+    entities = await db.entities.find({"investigation_id": investigation_id}, {"_id": 0}).skip(skip).limit(limit).to_list(limit)
     for ent in entities:
         if isinstance(ent.get('created_at'), str):
             ent['created_at'] = datetime.fromisoformat(ent['created_at'])
-    
+
     return entities
+
 
 @api_router.delete("/investigations/{investigation_id}/entities/{entity_id}")
 async def delete_entity(investigation_id: str, entity_id: str, x_api_key: str = Header(None)):
     await validate_api_key(x_api_key)
-    
+
     result = await db.entities.delete_one({"id": entity_id, "investigation_id": investigation_id})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Entity not found")
-    
+
     # Delete related relationships
     await db.relationships.delete_many({
         "investigation_id": investigation_id,
         "$or": [{"source_entity_id": entity_id}, {"target_entity_id": entity_id}]
     })
-    
+
     await create_timeline_event(
         investigation_id,
         "entity_removed",
-        f"Removed entity",
+        "Removed entity",
         entity_id=entity_id
     )
-    
+
     return {"success": True}
+
 
 @api_router.patch("/investigations/{investigation_id}/entities/{entity_id}", response_model=Entity)
 async def update_entity(
@@ -1544,107 +1854,118 @@ async def update_entity(
 
 # ============= RELATIONSHIPS =============
 
+
 @api_router.post("/investigations/{investigation_id}/relationships", response_model=Relationship)
 async def create_relationship(investigation_id: str, input: RelationshipCreate, x_api_key: str = Header(None)):
     await validate_api_key(x_api_key)
-    
+
     relationship = Relationship(
         investigation_id=investigation_id,
         **input.model_dump()
     )
-    
+
     doc = serialize_datetime(relationship.model_dump())
     await db.relationships.insert_one(doc)
-    
+
     await create_timeline_event(
         investigation_id,
         "relationship_discovered",
         f"Connection discovered: {relationship.relationship_type}"
     )
-    
+
     return relationship
 
-@api_router.get("/investigations/{investigation_id}/relationships", response_model=List[Relationship])
-async def get_relationships(investigation_id: str, x_api_key: str = Header(None)):
+
+@api_router.get("/investigations/{investigation_id}/relationships")
+async def get_relationships(investigation_id: str, x_api_key: str = Header(None), skip: int = 0, limit: int = 500):
     await validate_api_key(x_api_key)
-    
-    relationships = await db.relationships.find({"investigation_id": investigation_id}, {"_id": 0}).to_list(1000)
+    limit = min(limit, 2000)
+
+    relationships = await db.relationships.find({"investigation_id": investigation_id}, {"_id": 0}).skip(skip).limit(limit).to_list(limit)
     for rel in relationships:
         if isinstance(rel.get('created_at'), str):
             rel['created_at'] = datetime.fromisoformat(rel['created_at'])
-    
+
     return relationships
+
 
 @api_router.delete("/investigations/{investigation_id}/relationships/{relationship_id}")
 async def delete_relationship(investigation_id: str, relationship_id: str, x_api_key: str = Header(None)):
     await validate_api_key(x_api_key)
-    
+
     result = await db.relationships.delete_one({"id": relationship_id, "investigation_id": investigation_id})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Relationship not found")
-    
+
     return {"success": True}
 
 # ============= TIMELINE =============
 
-@api_router.get("/investigations/{investigation_id}/timeline", response_model=List[TimelineEvent])
-async def get_timeline(investigation_id: str, x_api_key: str = Header(None)):
+
+@api_router.get("/investigations/{investigation_id}/timeline")
+async def get_timeline(investigation_id: str, x_api_key: str = Header(None), skip: int = 0, limit: int = 200):
     await validate_api_key(x_api_key)
-    
+    limit = min(limit, 1000)
+
     events = await db.timeline_events.find(
         {"investigation_id": investigation_id},
         {"_id": 0}
-    ).sort("timestamp", -1).to_list(1000)
-    
+    ).sort("timestamp", -1).skip(skip).limit(limit).to_list(limit)
+
     for event in events:
         if isinstance(event.get('timestamp'), str):
             event['timestamp'] = datetime.fromisoformat(event['timestamp'])
-    
+
     return events
 
 # ============= EVIDENCE =============
 
+
 @api_router.post("/investigations/{investigation_id}/evidence", response_model=Evidence)
 async def create_evidence(investigation_id: str, input: EvidenceCreate, x_api_key: str = Header(None)):
     await validate_api_key(x_api_key)
-    
+
     evidence = Evidence(
         investigation_id=investigation_id,
         **input.model_dump()
     )
-    
+
     doc = serialize_datetime(evidence.model_dump())
     await db.evidence.insert_one(doc)
-    
+
     await create_timeline_event(
         investigation_id,
         "evidence_added",
         f"Added evidence: {evidence.evidence_type}",
         entity_id=evidence.entity_id
     )
-    
+
     return evidence
 
-@api_router.get("/investigations/{investigation_id}/evidence", response_model=List[Evidence])
-async def get_evidence(investigation_id: str, x_api_key: str = Header(None)):
+
+@api_router.get("/investigations/{investigation_id}/evidence")
+async def get_evidence(investigation_id: str, x_api_key: str = Header(None), skip: int = 0, limit: int = 500):
     await validate_api_key(x_api_key)
-    
-    evidence = await db.evidence.find({"investigation_id": investigation_id}, {"_id": 0}).to_list(1000)
+    limit = min(limit, 2000)
+
+    evidence = await db.evidence.find({"investigation_id": investigation_id}, {"_id": 0}).skip(skip).limit(limit).to_list(limit)
     for ev in evidence:
         if isinstance(ev.get('collected_at'), str):
             ev['collected_at'] = datetime.fromisoformat(ev['collected_at'])
-    
+
     return evidence
+
 
 @api_router.delete("/investigations/{investigation_id}/evidence/{evidence_id}")
 async def delete_evidence(investigation_id: str, evidence_id: str, x_api_key: str = Header(None)):
     await validate_api_key(x_api_key)
-    
+
     result = await db.evidence.delete_one({"id": evidence_id, "investigation_id": investigation_id})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Evidence not found")
-    
+
     return {"success": True}
+
 
 @api_router.patch("/investigations/{investigation_id}/evidence/{evidence_id}", response_model=Evidence)
 async def update_evidence(
@@ -1687,79 +2008,355 @@ async def update_evidence(
 
 # ============= AI SUGGESTIONS =============
 
+
 @api_router.get("/investigations/{investigation_id}/suggestions", response_model=List[AISuggestion])
 async def get_suggestions(investigation_id: str, x_api_key: str = Header(None)):
     await validate_api_key(x_api_key)
-    
+
     suggestions = await db.ai_suggestions.find(
         {"investigation_id": investigation_id, "status": "pending"},
         {"_id": 0}
-    ).to_list(1000)
-    
+    ).to_list(10000)
+
     for sug in suggestions:
         if isinstance(sug.get('created_at'), str):
             sug['created_at'] = datetime.fromisoformat(sug['created_at'])
-    
+
     return suggestions
+
 
 @api_router.patch("/investigations/{investigation_id}/suggestions/{suggestion_id}")
 async def update_suggestion_status(investigation_id: str, suggestion_id: str, status: str, x_api_key: str = Header(None)):
     await validate_api_key(x_api_key)
-    
+    valid_statuses = {"pending", "accepted", "rejected", "implemented"}
+    if status not in valid_statuses:
+        raise HTTPException(status_code=400, detail=f"status must be one of: {', '.join(sorted(valid_statuses))}")
+
     await db.ai_suggestions.update_one(
         {"id": suggestion_id, "investigation_id": investigation_id},
         {"$set": {"status": status}}
     )
-    
+
     return {"success": True}
 
+# ============= AUTONOMOUS INVESTIGATION =============
+
+
+class AutoInvestigateRequest(BaseModel):
+    seed_input: str = Field(..., description="Raw input text to start investigation from")
+    max_depth: int = Field(default=5, ge=1, le=10)
+    max_entities: int = Field(default=100, ge=10, le=500)
+    confidence_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
+
+
+@api_router.post("/investigations/{investigation_id}/auto-investigate")
+async def start_auto_investigation(
+    investigation_id: str,
+    request: AutoInvestigateRequest,
+    x_api_key: str = Header(None)
+):
+    """Start autonomous investigation."""
+    await validate_api_key(x_api_key)
+    _enforce_rate_limit(x_api_key, "ai")
+
+    inv = await db.investigations.find_one({"id": investigation_id})
+    if not inv:
+        raise HTTPException(status_code=404, detail="Investigation not found")
+
+    if not investigation_engine:
+        raise HTTPException(status_code=503, detail="Investigation engine not initialized")
+
+    current_state = investigation_engine.get_investigation_status(investigation_id)
+    if current_state and current_state.status == "running":
+        raise HTTPException(status_code=409, detail="Investigation already running")
+
+    async def run_investigation():
+        try:
+            async for event in investigation_engine.start_investigation(
+                investigation_id=investigation_id,
+                seed_input=request.seed_input,
+                max_depth=request.max_depth,
+                max_entities=request.max_entities,
+                confidence_threshold=request.confidence_threshold
+            ):
+                queues = _investigation_event_queues.get(investigation_id, [])
+                for q in queues:
+                    try:
+                        q.put_nowait(event)
+                    except _asyncio.QueueFull:
+                        pass
+        except Exception as e:
+            logger.error(f"Auto-investigation failed: {e}", exc_info=True)
+        finally:
+            queues = _investigation_event_queues.get(investigation_id, [])
+            for q in queues:
+                q.put_nowait(None)  # sentinel to signal completion
+
+    _asyncio.get_event_loop().create_task(run_investigation())
+
+    return {
+        "success": True,
+        "message": "Investigation started",
+        "investigation_id": investigation_id,
+        "stream_url": f"/api/investigations/{investigation_id}/stream"
+    }
+
+
+@api_router.get("/investigations/{investigation_id}/auto-status")
+async def get_investigation_auto_status(
+    investigation_id: str,
+    x_api_key: str = Header(None)
+):
+    """Get current status of autonomous investigation."""
+    await validate_api_key(x_api_key)
+
+    if not investigation_engine:
+        return {
+            "engine_available": False,
+            "status": "unavailable"
+        }
+
+    state = investigation_engine.get_investigation_status(investigation_id)
+
+    if not state:
+        return {
+            "engine_available": True,
+            "status": "not_started"
+        }
+
+    return {
+        "engine_available": True,
+        "status": state.status,
+        "processed_count": state.processed_count,
+        "entities_discovered": state.entities_discovered,
+        "current_depth": state.current_depth,
+        "queue_size": len(state.queue),
+        "max_depth": state.max_depth,
+        "max_entities": state.max_entities,
+        "started_at": state.started_at.isoformat() if state.started_at else None,
+        "completed_at": state.completed_at.isoformat() if state.completed_at else None,
+        "error": state.error
+    }
+
+
+@api_router.get("/investigations/{investigation_id}/stream")
+async def stream_investigation_events(
+    investigation_id: str,
+    x_api_key: Optional[str] = Header(None),
+    api_key: Optional[str] = None,
+):
+    """SSE stream of real-time investigation events."""
+    key = x_api_key or api_key
+    if not key:
+        raise HTTPException(status_code=401, detail="Missing API key")
+    await validate_api_key(key)
+
+    queue = _asyncio.Queue(maxsize=256)
+    _investigation_event_queues.setdefault(investigation_id, []).append(queue)
+
+    async def event_generator():
+        try:
+            yield {"event": "connected", "data": json.dumps({"investigation_id": investigation_id})}
+            while True:
+                event = await queue.get()
+                if event is None:
+                    yield {"event": "completed", "data": json.dumps({"investigation_id": investigation_id})}
+                    break
+                yield {"data": json.dumps(event if isinstance(event, dict) else {"message": str(event)})}
+        finally:
+            queues = _investigation_event_queues.get(investigation_id, [])
+            if queue in queues:
+                queues.remove(queue)
+
+    return EventSourceResponse(event_generator())
+
+
 # ============= OSINT SEARCH =============
+
+async def _search_ghosint(query: str, search_type: str) -> list:
+    """Query GHOSINT and return a list of result dicts."""
+    if not GHOSINT_API_KEY:
+        return []
+    free_services = ["leakcheck", "snusbase", "breachvip"]
+    paid_services = ["ghosint.search", "leakosint"]
+    services = list(free_services)
+    if search_type in ("url", "wallet"):
+        services = list(paid_services)
+    elif search_type == "phone":
+        services = free_services + ["seon"]
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as c:
+            resp = await c.post(
+                "https://api.ghosint.io/search",
+                json={"key": GHOSINT_API_KEY, "query": query, "services": services},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        if not data.get("success"):
+            return []
+        results = []
+        for svc_name, svc_data in data.get("response", {}).items():
+            if isinstance(svc_data, dict) and svc_data.get("error"):
+                continue
+            results.append({"source": f"ghosint/{svc_name}", "data": svc_data, "risk": 0.5})
+        return results
+    except Exception as e:
+        logger.warning(f"GHOSINT search failed: {e}")
+        return []
+
+
+# Swatted modules per search type — each entry is (method, path, body_builder, label).
+# Only modules with confirmed Session API access are included.
+_SWATTED_MODULES = {
+    "email": [
+        ("POST", "/api/leakosint/search", lambda q: {"query": q}, "leakosint"),
+        ("POST", "/api/snusbase/search", lambda q: {"query": q}, "snusbase"),
+        ("POST", "/api/leakcheck/v2", lambda q: {"query": q}, "leakcheck"),
+        ("POST", "/api/breachint/search", lambda q: {"query": q}, "breachint"),
+        ("POST", "/api/stealerlogs/search", lambda q: {"query": q, "type": "email"}, "stealerlogs"),
+    ],
+    "username": [
+        ("POST", "/api/leakosint/search", lambda q: {"query": q}, "leakosint"),
+        ("POST", "/api/snusbase/search", lambda q: {"query": q}, "snusbase"),
+        ("GET", "/api/tiktok_lookup", lambda q: q, "tiktok"),
+        ("GET", "/api/instagram_lookup", lambda q: q, "instagram"),
+    ],
+    "phone": [
+        ("POST", "/api/leakosint/search", lambda q: {"query": q}, "leakosint"),
+        ("POST", "/api/snusbase/search", lambda q: {"query": q}, "snusbase"),
+    ],
+    "domain": [
+        ("POST", "/api/shodan/dns", lambda q: {"domain": q}, "shodan_dns"),
+        ("POST", "/api/infodra", lambda q: {"query": q}, "infodra"),
+    ],
+    "ip": [
+        ("POST", "/api/shodan/host", lambda q: {"ip": q}, "shodan"),
+        ("POST", "/api/stealerlogs/iplookup", lambda q: {"query": q}, "stealerlogs_ip"),
+    ],
+    "wallet": [
+        ("POST", "/api/crypto", lambda q: {"query": q}, "crypto"),
+    ],
+}
+
+
+async def _search_swatted_module(creds, cookies, method, path, body_fn, query, label):
+    """Call a single Swatted module. Returns a result dict or None."""
+    try:
+        async with httpx.AsyncClient(timeout=25.0, cookies=cookies) as c:
+            if method == "POST":
+                resp = await c.post(
+                    f"https://swattedw.tf{path}",
+                    json=body_fn(query),
+                    headers=_swatted_headers(creds, with_csrf=True),
+                )
+            else:
+                resp = await c.get(
+                    f"https://swattedw.tf{path}",
+                    params={"username": query} if "lookup" in path else {"query": query},
+                    headers=_swatted_headers(creds),
+                )
+            if resp.status_code in (401, 403):
+                logger.debug(f"Swatted {label}: {resp.status_code} {resp.text[:200]}")
+                return None
+            resp.raise_for_status()
+            data = resp.json()
+        return {"source": f"swatted/{label}", "data": data, "risk": 0.5}
+    except Exception as e:
+        logger.debug(f"Swatted {label} failed: {e}")
+        return None
+
+
+async def _search_swatted(query: str, search_type: str) -> list:
+    """Query all relevant Swatted modules in parallel for a search type."""
+    session = await _get_swatted_session()
+    if not session:
+        return []
+    creds, cookies = session
+    modules = _SWATTED_MODULES.get(search_type, [])
+    if not modules:
+        return []
+    import asyncio
+    tasks = [
+        _search_swatted_module(creds, cookies, method, path, body_fn, query, label)
+        for method, path, body_fn, label in modules
+    ]
+    raw = await asyncio.gather(*tasks)
+    results = [r for r in raw if r is not None]
+    if not results and raw:
+        global _swatted_session
+        _swatted_session = None
+        logger.warning("Swatted: all modules failed, clearing session for re-auth")
+    return results
+
 
 @api_router.post("/osint/search")
 async def osint_search(input: OSINTSearchRequest, x_api_key: str = Header(None)):
     await validate_api_key(x_api_key)
-    
-    # Mock OSINT results
-    results = MOCK_OSINT_DATA.get(input.search_type, [
-        {"source": "general", "data": f"Mock data for {input.query}", "risk": 0.3}
-    ])
-    
+    _enforce_rate_limit(x_api_key, "osint")
+
+    if not GHOSINT_API_KEY and not SWATTED_API_TOKEN and not BOSINT_API_KEY:
+        results = MOCK_OSINT_DATA.get(input.search_type, [
+            {"source": "general", "data": f"Mock data for {input.query}", "risk": 0.3}
+        ])
+        return {
+            "query": input.query,
+            "search_type": input.search_type,
+            "results": results,
+            "live_data": False,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+
+    import asyncio
+    tasks = [
+        asyncio.create_task(_search_ghosint(input.query, input.search_type)),
+        asyncio.create_task(_search_swatted(input.query, input.search_type)),
+        asyncio.create_task(_search_bosint(input.query, input.search_type)),
+    ]
+    all_results = await asyncio.gather(*tasks)
+
+    results = []
+    for batch in all_results:
+        results.extend(batch)
+
     return {
         "query": input.query,
         "search_type": input.search_type,
         "results": results,
+        "live_data": True,
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
 # ============= AI ANALYSIS =============
 
+
 @api_router.post("/ai/analyze")
 async def ai_analyze(input: AIAnalysisRequest, x_api_key: str = Header(None)):
     await validate_api_key(x_api_key)
-    
+    _enforce_rate_limit(x_api_key, "ai")
+
     try:
         # Fetch investigation data
-        entities = await db.entities.find({"investigation_id": input.investigation_id}, {"_id": 0}).to_list(1000)
-        relationships = await db.relationships.find({"investigation_id": input.investigation_id}, {"_id": 0}).to_list(1000)
-        
+        entities = await db.entities.find({"investigation_id": input.investigation_id}, {"_id": 0}).to_list(10000)
+        relationships = await db.relationships.find({"investigation_id": input.investigation_id}, {"_id": 0}).to_list(10000)
+
         # Build context for AI
         context = f"""
 You are an OSINT investigation assistant analyzing a case.
 
 Entities in investigation: {len(entities)}
 """
-        
+
         if entities:
             context += "\n\nKey entities:\n"
             for ent in entities[:10]:  # Limit to first 10
                 context += f"- {ent['entity_type']}: {ent['value']}\n"
-        
+
         if relationships:
             context += f"\n\nRelationships: {len(relationships)} connections discovered\n"
-        
+
         if input.context:
             context += f"\n\nAdditional context: {input.context}\n"
-        
+
         context += """
 \nProvide 3-5 investigative suggestions. For each suggestion, provide:
 1. A clear title
@@ -1777,20 +2374,23 @@ Format as JSON array with structure:
   }
 ]
 """
-        
-        # Choose model based on mode
-        model = "gemini-3-flash-preview" if input.mode == "flash" else "gemini-3-pro-preview"
-        
-        # Call Gemini
-        chat = LlmChat(
-            api_key=EMERGENT_LLM_KEY,
-            session_id=f"analysis-{input.investigation_id}",
-            system_message="You are an expert OSINT investigator providing actionable intelligence suggestions."
-        ).with_model("gemini", model)
-        
-        user_message = UserMessage(text=context)
-        response = await chat.send_message(user_message)
-        
+
+        # Choose model based on mode (see GEMINI_MODEL_* env vars)
+        model = GEMINI_MODEL_FLASH if (input.mode or "").lower() == "flash" else GEMINI_MODEL_PRO
+
+        if not _gemini_client:
+            raise HTTPException(status_code=503, detail="GEMINI_API_KEY not configured")
+
+        gemini_response = _gemini_client.models.generate_content(
+            model=model,
+            contents=context,
+            config=genai.types.GenerateContentConfig(
+                system_instruction="You are an expert OSINT investigator providing actionable intelligence suggestions.",
+                temperature=0.7,
+            ),
+        )
+        response = gemini_response.text
+
         # Parse AI response
         try:
             # Extract JSON from response
@@ -1799,9 +2399,9 @@ Format as JSON array with structure:
                 response_text = response_text.split("```json")[1].split("```")[0].strip()
             elif "```" in response_text:
                 response_text = response_text.split("```")[1].split("```")[0].strip()
-            
+
             suggestions_data = json.loads(response_text)
-            
+
             # Store suggestions in database
             for sug_data in suggestions_data:
                 suggestion = AISuggestion(
@@ -1813,13 +2413,13 @@ Format as JSON array with structure:
                 )
                 doc = serialize_datetime(suggestion.model_dump())
                 await db.ai_suggestions.insert_one(doc)
-            
+
             await create_timeline_event(
                 input.investigation_id,
                 "ai_analysis",
                 f"AI analysis completed using {model} - {len(suggestions_data)} suggestions generated"
             )
-            
+
             return {
                 "success": True,
                 "model_used": model,
@@ -1837,49 +2437,119 @@ Format as JSON array with structure:
             )
             doc = serialize_datetime(suggestion.model_dump())
             await db.ai_suggestions.insert_one(doc)
-            
+
             return {
                 "success": True,
                 "model_used": model,
                 "suggestions_count": 1,
                 "raw_response": response
             }
-    
+
     except Exception as e:
         logger.error(f"AI analysis error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"AI analysis failed: {str(e)}")
+        logger.error(f"AI analysis failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="AI analysis failed. Please try again later.")
 
 # ============= REPORTS =============
+
 
 @api_router.get("/investigations/{investigation_id}/report")
 async def generate_report(investigation_id: str, x_api_key: str = Header(None)):
     await validate_api_key(x_api_key)
-    
-    # Fetch all data
+
     investigation = await db.investigations.find_one({"id": investigation_id}, {"_id": 0})
     if not investigation:
         raise HTTPException(status_code=404, detail="Investigation not found")
-    
-    entities = await db.entities.find({"investigation_id": investigation_id}, {"_id": 0}).to_list(1000)
-    relationships = await db.relationships.find({"investigation_id": investigation_id}, {"_id": 0}).to_list(1000)
-    evidence = await db.evidence.find({"investigation_id": investigation_id}, {"_id": 0}).to_list(1000)
-    timeline = await db.timeline_events.find({"investigation_id": investigation_id}, {"_id": 0}).sort("timestamp", -1).to_list(1000)
-    
+
+    entities = await db.entities.find({"investigation_id": investigation_id}, {"_id": 0}).to_list(10000)
+    relationships = await db.relationships.find({"investigation_id": investigation_id}, {"_id": 0}).to_list(10000)
+    evidence = await db.evidence.find({"investigation_id": investigation_id}, {"_id": 0}).to_list(10000)
+    timeline = await db.timeline_events.find({"investigation_id": investigation_id}, {"_id": 0}).sort("timestamp", -1).to_list(10000)
+    leads = await db.investigation_leads.find({"investigation_id": investigation_id}, {"_id": 0}).to_list(10000)
+
+    # --- Threat scoring ---
+    entity_type_counts = {}
+    high_risk_entities = []
+    for e in entities:
+        etype = e.get("entity_type", "unknown")
+        entity_type_counts[etype] = entity_type_counts.get(etype, 0) + 1
+        risk = e.get("risk_score", 0)
+        if risk >= 0.7:
+            high_risk_entities.append({"id": e.get("id"), "type": etype, "value": e.get("value"), "risk_score": risk})
+
+    # Connection density = relationships / max(entities, 1)
+    connection_density = round(len(relationships) / max(len(entities), 1), 2)
+
+    # Overall threat score: weighted average of entity risks + lead severity
+    risk_scores = [e.get("risk_score", 0) for e in entities if e.get("risk_score", 0) > 0]
+    severity_map = {"critical": 1.0, "high": 0.75, "medium": 0.5, "low": 0.25}
+    lead_scores = [severity_map.get(ld.get("severity", "medium"), 0.5) for ld in leads]
+    all_scores = risk_scores + lead_scores
+    overall_threat_score = round(sum(all_scores) / max(len(all_scores), 1), 2)
+    if overall_threat_score >= 0.75:
+        threat_level = "CRITICAL"
+    elif overall_threat_score >= 0.5:
+        threat_level = "HIGH"
+    elif overall_threat_score >= 0.25:
+        threat_level = "MEDIUM"
+    else:
+        threat_level = "LOW"
+
+    # --- Evidence chain summary ---
+    verified_evidence = [e for e in evidence if e.get("verification_status") == "verified"]
+    disputed_evidence = [e for e in evidence if e.get("verification_status") == "disputed"]
+    evidence_by_type = {}
+    for e in evidence:
+        etype = e.get("evidence_type", "unknown")
+        evidence_by_type[etype] = evidence_by_type.get(etype, 0) + 1
+
+    # --- Key findings (most connected entities) ---
+    connection_count = {}
+    for r in relationships:
+        connection_count[r.get("source_entity_id", "")] = connection_count.get(r.get("source_entity_id", ""), 0) + 1
+        connection_count[r.get("target_entity_id", "")] = connection_count.get(r.get("target_entity_id", ""), 0) + 1
+    entity_map = {e.get("id"): e for e in entities}
+    key_entities = sorted(connection_count.items(), key=lambda x: x[1], reverse=True)[:10]
+    key_findings = []
+    for eid, count in key_entities:
+        ent = entity_map.get(eid)
+        if ent:
+            key_findings.append({
+                "entity_id": eid, "type": ent.get("entity_type"), "value": ent.get("value"),
+                "connections": count, "risk_score": ent.get("risk_score", 0),
+            })
+
     return {
         "investigation": investigation,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "threat_assessment": {
+            "overall_score": overall_threat_score,
+            "threat_level": threat_level,
+            "high_risk_entities": high_risk_entities,
+            "connection_density": connection_density,
+        },
         "statistics": {
             "total_entities": len(entities),
             "total_relationships": len(relationships),
             "total_evidence": len(evidence),
-            "timeline_events": len(timeline)
+            "verified_evidence": len(verified_evidence),
+            "disputed_evidence": len(disputed_evidence),
+            "total_leads": len(leads),
+            "timeline_events": len(timeline),
+            "entity_breakdown": entity_type_counts,
+            "evidence_breakdown": evidence_by_type,
         },
+        "key_findings": key_findings,
+        "leads": [{"id": ld.get("id"), "type": ld.get("lead_type"), "title": ld.get("title"),
+                  "severity": ld.get("severity"), "status": ld.get("status")} for ld in leads],
         "entities": entities,
         "relationships": relationships,
         "evidence": evidence,
-        "timeline": timeline[:50]  # Latest 50 events
+        "timeline": timeline[:100],
     }
 
 # ============= ENTITY EXTRACTION =============
+
 
 @api_router.post("/extract/entities")
 async def api_extract_entities(
@@ -1888,10 +2558,10 @@ async def api_extract_entities(
 ):
     """Extract potential entities from text content"""
     await validate_api_key(x_api_key)
-    
+
     # Use the helper function
     extracted = extract_entities_from_text(request.text, request.source_evidence_id)
-    
+
     return {
         "success": True,
         "extracted_count": len(extracted),
@@ -1901,6 +2571,7 @@ async def api_extract_entities(
 
 # ============= ENTITY ENRICHMENT =============
 
+
 @api_router.post("/enrich/entity")
 async def enrich_entity(
     request: EnrichmentRequest,
@@ -1908,17 +2579,18 @@ async def enrich_entity(
 ):
     """Enrich an entity with intelligence data"""
     await validate_api_key(x_api_key)
-    
+
     enrichment_data = generate_mock_enrichment(
         request.entity_type,
         request.entity_value
     )
-    
+
     return {
         "success": True,
         "entity_id": request.entity_id,
         "enrichment": enrichment_data
     }
+
 
 @api_router.get("/investigations/{investigation_id}/entities/{entity_id}/enrichment")
 async def get_entity_enrichment(
@@ -1928,20 +2600,20 @@ async def get_entity_enrichment(
 ):
     """Get enrichment data for a specific entity"""
     await validate_api_key(x_api_key)
-    
+
     entity = await db.entities.find_one(
         {"id": entity_id, "investigation_id": investigation_id},
         {"_id": 0}
     )
-    
+
     if not entity:
         raise HTTPException(status_code=404, detail="Entity not found")
-    
+
     enrichment_data = generate_mock_enrichment(
         entity["entity_type"],
         entity["value"]
     )
-    
+
     return {
         "success": True,
         "entity": entity,
@@ -1950,6 +2622,7 @@ async def get_entity_enrichment(
 
 # ============= GRAPH INTELLIGENCE =============
 
+
 @api_router.post("/investigations/{investigation_id}/graph/analyze")
 async def analyze_investigation_graph(
     investigation_id: str,
@@ -1957,21 +2630,21 @@ async def analyze_investigation_graph(
 ):
     """Perform graph intelligence analysis on investigation data"""
     await validate_api_key(x_api_key)
-    
+
     # Fetch entities and relationships
     entities = await db.entities.find(
         {"investigation_id": investigation_id},
         {"_id": 0}
-    ).to_list(1000)
-    
+    ).to_list(10000)
+
     relationships = await db.relationships.find(
         {"investigation_id": investigation_id},
         {"_id": 0}
-    ).to_list(1000)
-    
+    ).to_list(10000)
+
     # Perform analysis
     analysis = analyze_graph_intelligence(entities, relationships)
-    
+
     # Create timeline event
     await create_timeline_event(
         investigation_id=investigation_id,
@@ -1979,12 +2652,13 @@ async def analyze_investigation_graph(
         description=f"Graph analysis performed: {analysis['summary']}",
         metadata={"clusters_found": len(analysis["clusters"]), "patterns_found": len(analysis["suspicious_patterns"])}
     )
-    
+
     return {
         "success": True,
         "investigation_id": investigation_id,
         "analysis": analysis
     }
+
 
 @api_router.get("/investigations/{investigation_id}/graph/clusters")
 async def get_graph_clusters(
@@ -1993,24 +2667,25 @@ async def get_graph_clusters(
 ):
     """Get detected clusters in the investigation graph"""
     await validate_api_key(x_api_key)
-    
+
     entities = await db.entities.find(
         {"investigation_id": investigation_id},
         {"_id": 0}
-    ).to_list(1000)
-    
+    ).to_list(10000)
+
     relationships = await db.relationships.find(
         {"investigation_id": investigation_id},
         {"_id": 0}
-    ).to_list(1000)
-    
+    ).to_list(10000)
+
     analysis = analyze_graph_intelligence(entities, relationships)
-    
+
     return {
         "success": True,
         "clusters": analysis["clusters"],
         "central_nodes": analysis["central_nodes"]
     }
+
 
 @api_router.get("/investigations/{investigation_id}/graph/suspicious-patterns")
 async def get_suspicious_patterns(
@@ -2019,19 +2694,19 @@ async def get_suspicious_patterns(
 ):
     """Get detected suspicious patterns in the investigation"""
     await validate_api_key(x_api_key)
-    
+
     entities = await db.entities.find(
         {"investigation_id": investigation_id},
         {"_id": 0}
-    ).to_list(1000)
-    
+    ).to_list(10000)
+
     relationships = await db.relationships.find(
         {"investigation_id": investigation_id},
         {"_id": 0}
-    ).to_list(1000)
-    
+    ).to_list(10000)
+
     analysis = analyze_graph_intelligence(entities, relationships)
-    
+
     return {
         "success": True,
         "patterns": analysis["suspicious_patterns"],
@@ -2040,6 +2715,7 @@ async def get_suspicious_patterns(
 
 # ============= INVESTIGATION LEADS =============
 
+
 @api_router.post("/investigations/{investigation_id}/leads/generate")
 async def generate_leads(
     investigation_id: str,
@@ -2047,31 +2723,31 @@ async def generate_leads(
 ):
     """Generate investigation leads using the automated hypothesis engine"""
     await validate_api_key(x_api_key)
-    
+
     # Fetch all investigation data
     entities = await db.entities.find(
         {"investigation_id": investigation_id},
         {"_id": 0}
-    ).to_list(1000)
-    
+    ).to_list(10000)
+
     relationships = await db.relationships.find(
         {"investigation_id": investigation_id},
         {"_id": 0}
-    ).to_list(1000)
-    
+    ).to_list(10000)
+
     evidence = await db.evidence.find(
         {"investigation_id": investigation_id},
         {"_id": 0}
-    ).to_list(1000)
-    
+    ).to_list(10000)
+
     timeline = await db.timeline_events.find(
         {"investigation_id": investigation_id},
         {"_id": 0}
     ).sort("timestamp", -1).to_list(100)
-    
+
     # Generate leads
     leads = generate_investigation_leads(entities, relationships, evidence, timeline)
-    
+
     # Store leads in database
     for lead in leads:
         lead["investigation_id"] = investigation_id
@@ -2081,20 +2757,21 @@ async def generate_leads(
             {"$set": lead},
             upsert=True
         )
-    
+
     # Create timeline event
     await create_timeline_event(
         investigation_id=investigation_id,
         event_type="leads_generated",
         description=f"Lead engine generated {len(leads)} investigation leads",
-        metadata={"lead_count": len(leads), "lead_types": list(set(l["lead_type"] for l in leads))}
+        metadata={"lead_count": len(leads), "lead_types": list(set(ld["lead_type"] for ld in leads))}
     )
-    
+
     return {
         "success": True,
         "leads_generated": len(leads),
         "leads": leads
     }
+
 
 @api_router.get("/investigations/{investigation_id}/leads")
 async def get_investigation_leads(
@@ -2104,18 +2781,19 @@ async def get_investigation_leads(
 ):
     """Get all leads for an investigation"""
     await validate_api_key(x_api_key)
-    
+
     query = {"investigation_id": investigation_id}
     if status:
         query["status"] = status
-    
+
     leads = await db.investigation_leads.find(query, {"_id": 0}).sort("created_at", -1).to_list(100)
-    
+
     return {
         "success": True,
         "total": len(leads),
         "leads": leads
     }
+
 
 @api_router.patch("/investigations/{investigation_id}/leads/{lead_id}")
 async def update_lead_status(
@@ -2126,18 +2804,18 @@ async def update_lead_status(
 ):
     """Update the status of an investigation lead"""
     await validate_api_key(x_api_key)
-    
+
     if status not in ["new", "investigating", "confirmed", "dismissed"]:
         raise HTTPException(status_code=400, detail="Invalid status")
-    
+
     result = await db.investigation_leads.update_one(
         {"id": lead_id, "investigation_id": investigation_id},
         {"$set": {"status": status, "updated_at": datetime.now(timezone.utc).isoformat()}}
     )
-    
+
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Lead not found")
-    
+
     # Create timeline event
     await create_timeline_event(
         investigation_id=investigation_id,
@@ -2145,8 +2823,9 @@ async def update_lead_status(
         description=f"Lead status updated to: {status}",
         metadata={"lead_id": lead_id, "new_status": status}
     )
-    
+
     return {"success": True, "lead_id": lead_id, "status": status}
+
 
 @api_router.delete("/investigations/{investigation_id}/leads/{lead_id}")
 async def delete_lead(
@@ -2156,17 +2835,18 @@ async def delete_lead(
 ):
     """Delete an investigation lead"""
     await validate_api_key(x_api_key)
-    
+
     result = await db.investigation_leads.delete_one(
         {"id": lead_id, "investigation_id": investigation_id}
     )
-    
+
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Lead not found")
-    
+
     return {"success": True}
 
 # ============= AI CHAT ENDPOINTS =============
+
 
 @api_router.get("/investigations/{investigation_id}/chat/history")
 async def get_chat_history(
@@ -2177,20 +2857,21 @@ async def get_chat_history(
 ):
     """Get chat history for an investigation"""
     await validate_api_key(x_api_key)
-    
+
     query = {"investigation_id": investigation_id}
     if session_id:
         query["session_id"] = session_id
-    
+
     messages = await db.chat_messages.find(
         query,
         {"_id": 0}
     ).sort("timestamp", 1).to_list(limit)
-    
+
     return {
         "messages": messages,
         "count": len(messages)
     }
+
 
 @api_router.post("/investigations/{investigation_id}/chat")
 async def chat_with_ai(
@@ -2200,10 +2881,11 @@ async def chat_with_ai(
 ):
     """Interactive AI chat with investigation context"""
     await validate_api_key(x_api_key)
-    
+    _enforce_rate_limit(x_api_key, "ai")
+
     # Get or create session ID
     session_id = request.session_id or f"chat-{investigation_id}-{uuid.uuid4().hex[:8]}"
-    
+
     try:
         # Fetch investigation context
         investigation = await db.investigations.find_one(
@@ -2211,44 +2893,44 @@ async def chat_with_ai(
         )
         if not investigation:
             raise HTTPException(status_code=404, detail="Investigation not found")
-        
+
         entities = await db.entities.find(
             {"investigation_id": investigation_id}, {"_id": 0}
         ).to_list(100)
-        
+
         relationships = await db.relationships.find(
             {"investigation_id": investigation_id}, {"_id": 0}
         ).to_list(100)
-        
+
         evidence = await db.evidence.find(
             {"investigation_id": investigation_id}, {"_id": 0}
         ).to_list(50)
-        
-        timeline = await db.timeline_events.find(
+
+        _timeline = await db.timeline_events.find(  # noqa: F841
             {"investigation_id": investigation_id}, {"_id": 0}
         ).sort("timestamp", -1).to_list(20)
-        
+
         leads = await db.investigation_leads.find(
             {"investigation_id": investigation_id}, {"_id": 0}
         ).to_list(20)
-        
+
         # Get chat history for context
         chat_history = await db.chat_messages.find(
             {"investigation_id": investigation_id, "session_id": session_id},
             {"_id": 0}
         ).sort("timestamp", 1).to_list(20)
-        
+
         # Build comprehensive context
         context_parts = [
             f"# Investigation: {investigation.get('name', 'Unknown')}",
             f"Description: {investigation.get('description', 'N/A')}",
-            f"\n## Statistics:",
+            "\n## Statistics:",
             f"- Entities: {len(entities)}",
             f"- Relationships: {len(relationships)}",
             f"- Evidence Items: {len(evidence)}",
             f"- Investigation Leads: {len(leads)}",
         ]
-        
+
         if entities:
             context_parts.append("\n## Key Entities:")
             entities_by_type = {}
@@ -2257,10 +2939,10 @@ async def chat_with_ai(
                 if et not in entities_by_type:
                     entities_by_type[et] = []
                 entities_by_type[et].append(e.get('value', '')[:50])
-            
+
             for etype, values in list(entities_by_type.items())[:8]:
                 context_parts.append(f"- {etype.upper()}: {', '.join(values[:5])}")
-        
+
         if relationships:
             context_parts.append(f"\n## Relationships: {len(relationships)} connections discovered")
             entity_lookup = {e['id']: e for e in entities}
@@ -2268,49 +2950,52 @@ async def chat_with_ai(
                 source = entity_lookup.get(rel.get('source_entity_id'), {})
                 target = entity_lookup.get(rel.get('target_entity_id'), {})
                 context_parts.append(f"- {source.get('value', '?')[:20]} → {rel.get('relationship_type', '?')} → {target.get('value', '?')[:20]}")
-        
+
         if leads:
             context_parts.append("\n## Active Leads:")
             for lead in leads[:5]:
                 context_parts.append(f"- [{lead.get('severity', 'medium').upper()}] {lead.get('title', '?')}: {lead.get('description', '')[:100]}")
-        
+
         if evidence:
             context_parts.append(f"\n## Evidence Summary: {len(evidence)} items")
             for ev in evidence[:5]:
                 context_parts.append(f"- [{ev.get('evidence_type', 'unknown')}] {ev.get('content', '')[:80]}...")
-        
+
         investigation_context = "\n".join(context_parts)
-        
+
         # Build system message
-        system_message = f"""You are an expert OSINT investigation analyst assistant. You have access to the current investigation data and can help analyze it.
+        system_message = (
+            "You are an expert OSINT investigation analyst assistant. "
+            "You have access to the current investigation data and can "
+            "help analyze it.\n\n"
+            "Your capabilities:\n"
+            "1. Answer questions about entities, relationships, and "
+            "evidence in this investigation\n"
+            "2. Identify patterns, connections, and suspicious "
+            "activities\n"
+            "3. Suggest next investigative steps\n"
+            "4. Summarize the investigation status\n"
+            "5. Analyze potential connections between entities\n"
+            "6. Assess risk levels and provide threat intelligence "
+            "insights\n\n"
+            "Always be professional, precise, and focus on actionable "
+            "intelligence. When analyzing data, cite specific entities "
+            "and relationships. If you identify potential leads or "
+            "patterns, explain your reasoning.\n\n"
+            "CURRENT INVESTIGATION DATA:\n"
+            f"{investigation_context}\n"
+        )
 
-Your capabilities:
-1. Answer questions about entities, relationships, and evidence in this investigation
-2. Identify patterns, connections, and suspicious activities
-3. Suggest next investigative steps
-4. Summarize the investigation status
-5. Analyze potential connections between entities
-6. Assess risk levels and provide threat intelligence insights
+        if not _gemini_client:
+            raise HTTPException(status_code=503, detail="GEMINI_API_KEY not configured")
 
-Always be professional, precise, and focus on actionable intelligence. When analyzing data, cite specific entities and relationships. If you identify potential leads or patterns, explain your reasoning.
+        # Build conversation history for Gemini
+        contents = []
+        for msg in chat_history[-10:]:
+            role = "user" if msg.get("role") == "user" else "model"
+            contents.append(genai.types.Content(role=role, parts=[genai.types.Part(text=msg.get("content", ""))]))
+        contents.append(genai.types.Content(role="user", parts=[genai.types.Part(text=request.message)]))
 
-CURRENT INVESTIGATION DATA:
-{investigation_context}
-"""
-        
-        # Initialize chat
-        chat = LlmChat(
-            api_key=EMERGENT_LLM_KEY,
-            session_id=session_id,
-            system_message=system_message
-        ).with_model("gemini", "gemini-3-flash-preview")
-        
-        # Add previous messages to context
-        for msg in chat_history[-10:]:  # Last 10 messages for context
-            if msg.get('role') == 'user':
-                await chat.send_message(UserMessage(text=msg.get('content', '')))
-            # Note: Assistant messages are automatically tracked by LlmChat
-        
         # Store user message
         user_msg = ChatMessage(
             investigation_id=investigation_id,
@@ -2320,10 +3005,17 @@ CURRENT INVESTIGATION DATA:
         )
         user_doc = serialize_datetime(user_msg.model_dump())
         await db.chat_messages.insert_one(user_doc)
-        
-        # Send message and get response
-        response = await chat.send_message(UserMessage(text=request.message))
-        
+
+        gemini_response = _gemini_client.models.generate_content(
+            model=GEMINI_MODEL_CHAT,
+            contents=contents,
+            config=genai.types.GenerateContentConfig(
+                system_instruction=system_message,
+                temperature=0.7,
+            ),
+        )
+        response = gemini_response.text
+
         # Store assistant message
         assistant_msg = ChatMessage(
             investigation_id=investigation_id,
@@ -2333,24 +3025,26 @@ CURRENT INVESTIGATION DATA:
         )
         assistant_doc = serialize_datetime(assistant_msg.model_dump())
         await db.chat_messages.insert_one(assistant_doc)
-        
+
         # Create timeline event
         await create_timeline_event(
             investigation_id,
             "ai_chat",
             f"AI chat interaction: {request.message[:50]}..."
         )
-        
+
         return {
             "success": True,
             "session_id": session_id,
             "message": response,
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
-        
+
     except Exception as e:
         logger.error(f"AI chat error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"AI chat failed: {str(e)}")
+        logger.error(f"AI chat failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="AI chat failed. Please try again later.")
+
 
 @api_router.delete("/investigations/{investigation_id}/chat/clear")
 async def clear_chat_history(
@@ -2360,19 +3054,20 @@ async def clear_chat_history(
 ):
     """Clear chat history for an investigation"""
     await validate_api_key(x_api_key)
-    
+
     query = {"investigation_id": investigation_id}
     if session_id:
         query["session_id"] = session_id
-    
+
     result = await db.chat_messages.delete_many(query)
-    
+
     return {
         "success": True,
         "deleted_count": result.deleted_count
     }
 
 # ============= QUICK EVIDENCE INGEST ENDPOINTS =============
+
 
 @api_router.post("/investigations/{investigation_id}/ingest/url")
 async def ingest_url(
@@ -2382,13 +3077,13 @@ async def ingest_url(
 ):
     """Quick ingest evidence from a URL with automatic content extraction and entity detection"""
     await validate_api_key(x_api_key)
-    
+
     # Fetch URL content
     url_data = await fetch_url_content(request.url)
-    
+
     if not url_data["success"]:
         raise HTTPException(status_code=400, detail=f"Failed to fetch URL: {url_data.get('error', 'Unknown error')}")
-    
+
     # Create evidence record
     evidence = Evidence(
         investigation_id=investigation_id,
@@ -2397,14 +3092,14 @@ async def ingest_url(
         content=url_data.get("content", "")[:10000],  # Limit stored content
         notes=request.notes or f"Auto-ingested from URL: {url_data.get('title', request.url)}"
     )
-    
+
     doc = serialize_datetime(evidence.model_dump())
     await db.evidence.insert_one(doc)
-    
+
     # Extract entities from content
     full_text = f"{url_data.get('title', '')} {url_data.get('content', '')} {request.url}"
     detected_entities = extract_entities_from_text(full_text, evidence.id)
-    
+
     # Create timeline event
     await create_timeline_event(
         investigation_id,
@@ -2412,7 +3107,7 @@ async def ingest_url(
         f"URL ingested: {url_data.get('title', request.url)[:50]}",
         metadata={"evidence_id": evidence.id, "detected_entities": len(detected_entities)}
     )
-    
+
     return {
         "success": True,
         "evidence": {
@@ -2429,6 +3124,7 @@ async def ingest_url(
         }
     }
 
+
 @api_router.post("/investigations/{investigation_id}/ingest/text")
 async def ingest_raw_text(
     investigation_id: str,
@@ -2437,10 +3133,10 @@ async def ingest_raw_text(
 ):
     """Quick ingest raw text with automatic entity extraction"""
     await validate_api_key(x_api_key)
-    
+
     if not request.content.strip():
         raise HTTPException(status_code=400, detail="Content cannot be empty")
-    
+
     # Create evidence record
     evidence = Evidence(
         investigation_id=investigation_id,
@@ -2448,13 +3144,13 @@ async def ingest_raw_text(
         content=request.content[:50000],  # Limit size
         notes=request.notes or f"Raw text: {request.title or 'Untitled'}"
     )
-    
+
     doc = serialize_datetime(evidence.model_dump())
     await db.evidence.insert_one(doc)
-    
+
     # Extract entities
     detected_entities = extract_entities_from_text(request.content, evidence.id)
-    
+
     # Group by type for stats
     entities_by_type = {}
     for entity in detected_entities:
@@ -2462,7 +3158,7 @@ async def ingest_raw_text(
         if etype not in entities_by_type:
             entities_by_type[etype] = 0
         entities_by_type[etype] += 1
-    
+
     # Create timeline event
     await create_timeline_event(
         investigation_id,
@@ -2470,7 +3166,7 @@ async def ingest_raw_text(
         f"Raw text ingested: {request.title or 'Untitled'}",
         metadata={"evidence_id": evidence.id, "detected_entities": len(detected_entities)}
     )
-    
+
     return {
         "success": True,
         "evidence": {
@@ -2486,6 +3182,7 @@ async def ingest_raw_text(
         }
     }
 
+
 @api_router.post("/investigations/{investigation_id}/ingest/file")
 async def ingest_file(
     investigation_id: str,
@@ -2496,18 +3193,18 @@ async def ingest_file(
 ):
     """Upload and ingest a file with OCR/text extraction"""
     await validate_api_key(x_api_key)
-    
+
     # Read file content
     file_content = await file.read()
     file_size = len(file_content)
-    
+
     if file_size > 10 * 1024 * 1024:  # 10MB limit
         raise HTTPException(status_code=400, detail="File too large (max 10MB)")
-    
+
     extracted_text = ""
     content_type = file.content_type or ""
     filename = file.filename or "uploaded_file"
-    
+
     # Extract text based on file type
     if "pdf" in content_type or filename.lower().endswith(".pdf"):
         extracted_text = extract_text_from_pdf(file_content)
@@ -2518,9 +3215,9 @@ async def ingest_file(
     elif "text" in content_type or any(filename.lower().endswith(ext) for ext in [".txt", ".log", ".csv"]):
         try:
             extracted_text = file_content.decode("utf-8")
-        except:
+        except (UnicodeDecodeError, ValueError):
             extracted_text = file_content.decode("latin-1", errors="ignore")
-    
+
     # Create evidence record
     evidence = Evidence(
         investigation_id=investigation_id,
@@ -2528,15 +3225,15 @@ async def ingest_file(
         content=extracted_text[:50000] if extracted_text else f"[Binary file: {filename}]",
         notes=notes or f"Uploaded file: {filename}"
     )
-    
+
     doc = serialize_datetime(evidence.model_dump())
     await db.evidence.insert_one(doc)
-    
+
     # Extract entities if we have text
     detected_entities = []
     if extracted_text:
         detected_entities = extract_entities_from_text(extracted_text, evidence.id)
-    
+
     # Group by type
     entities_by_type = {}
     for entity in detected_entities:
@@ -2544,7 +3241,7 @@ async def ingest_file(
         if etype not in entities_by_type:
             entities_by_type[etype] = 0
         entities_by_type[etype] += 1
-    
+
     # Create timeline event
     await create_timeline_event(
         investigation_id,
@@ -2557,7 +3254,7 @@ async def ingest_file(
             "detected_entities": len(detected_entities)
         }
     )
-    
+
     return {
         "success": True,
         "evidence": {
@@ -2577,6 +3274,7 @@ async def ingest_file(
         }
     }
 
+
 @api_router.post("/investigations/{investigation_id}/entities/batch")
 async def add_entities_batch(
     investigation_id: str,
@@ -2585,27 +3283,28 @@ async def add_entities_batch(
 ):
     """Add multiple entities at once (e.g., from detected indicators)"""
     await validate_api_key(x_api_key)
-    
+
     created_entities = []
-    
+    docs_to_insert = []
+
     for entity_data in entities:
         entity = Entity(
             investigation_id=investigation_id,
             **entity_data.model_dump()
         )
-        
-        doc = serialize_datetime(entity.model_dump())
-        await db.entities.insert_one(doc)
+        docs_to_insert.append(serialize_datetime(entity.model_dump()))
         created_entities.append(entity)
-    
-    # Create single timeline event for batch
+
+    if docs_to_insert:
+        await db.entities.insert_many(docs_to_insert)
+
     await create_timeline_event(
         investigation_id,
         "entities_batch_added",
         f"Batch added {len(created_entities)} entities",
         metadata={"count": len(created_entities)}
     )
-    
+
     return {
         "success": True,
         "created_count": len(created_entities),
@@ -2613,6 +3312,7 @@ async def add_entities_batch(
     }
 
 # ============= EVIDENCE CATEGORIES ENDPOINT =============
+
 
 @api_router.get("/evidence/categories")
 async def get_evidence_categories(x_api_key: Optional[str] = Header(None)):
@@ -2646,7 +3346,7 @@ async def find_duplicate_entities(
 
     entities = await db.entities.find(
         {"investigation_id": investigation_id}, {"_id": 0}
-    ).to_list(1000)
+    ).to_list(10000)
 
     # Group by type to limit comparison scope
     by_type: Dict[str, list] = {}
@@ -2797,6 +3497,7 @@ async def merge_entities(
 
 # ============= EXPORT ENDPOINTS =============
 
+
 @api_router.get("/investigations/{investigation_id}/export/json")
 async def export_investigation_json(
     investigation_id: str,
@@ -2817,9 +3518,9 @@ async def export_investigation_json(
     if not investigation:
         raise HTTPException(status_code=404, detail="Investigation not found")
 
-    entities = await db.entities.find({"investigation_id": investigation_id}, {"_id": 0}).to_list(1000)
-    relationships = await db.relationships.find({"investigation_id": investigation_id}, {"_id": 0}).to_list(1000)
-    evidence = await db.evidence.find({"investigation_id": investigation_id}, {"_id": 0}).to_list(1000)
+    entities = await db.entities.find({"investigation_id": investigation_id}, {"_id": 0}).to_list(10000)
+    relationships = await db.relationships.find({"investigation_id": investigation_id}, {"_id": 0}).to_list(10000)
+    evidence = await db.evidence.find({"investigation_id": investigation_id}, {"_id": 0}).to_list(10000)
     timeline = await db.timeline_events.find(
         {"investigation_id": investigation_id}, {"_id": 0}
     ).sort("timestamp", -1).to_list(100)
@@ -2872,8 +3573,8 @@ async def export_investigation_csv(
     if not investigation:
         raise HTTPException(status_code=404, detail="Investigation not found")
 
-    entities = await db.entities.find({"investigation_id": investigation_id}, {"_id": 0}).to_list(1000)
-    relationships = await db.relationships.find({"investigation_id": investigation_id}, {"_id": 0}).to_list(1000)
+    entities = await db.entities.find({"investigation_id": investigation_id}, {"_id": 0}).to_list(10000)
+    relationships = await db.relationships.find({"investigation_id": investigation_id}, {"_id": 0}).to_list(10000)
 
     # Build entity CSV
     entity_buf = io.StringIO()
@@ -2955,9 +3656,9 @@ async def export_investigation_markdown(
     if not investigation:
         raise HTTPException(status_code=404, detail="Investigation not found")
 
-    entities = await db.entities.find({"investigation_id": investigation_id}, {"_id": 0}).to_list(1000)
-    relationships = await db.relationships.find({"investigation_id": investigation_id}, {"_id": 0}).to_list(1000)
-    evidence = await db.evidence.find({"investigation_id": investigation_id}, {"_id": 0}).to_list(1000)
+    entities = await db.entities.find({"investigation_id": investigation_id}, {"_id": 0}).to_list(10000)
+    relationships = await db.relationships.find({"investigation_id": investigation_id}, {"_id": 0}).to_list(10000)
+    evidence = await db.evidence.find({"investigation_id": investigation_id}, {"_id": 0}).to_list(10000)
     leads = await db.investigation_leads.find(
         {"investigation_id": investigation_id}, {"_id": 0}
     ).sort("confidence", -1).to_list(50)
@@ -3007,24 +3708,22 @@ async def export_investigation_markdown(
 
     if evidence:
         lines.append(f"\n## Evidence ({len(evidence)})\n")
+        status_label = {"verified": "[verified]", "unverified": "[unverified]", "disputed": "[disputed]"}
         for ev in evidence:
-            status_emoji = {"verified": "✅", "unverified": "⬜", "disputed": "❌"}.get(
-                ev.get("verification_status", "unverified"), "⬜"
-            )
+            status_tag = status_label.get(ev.get("verification_status", "unverified"), "[unverified]")
             ev_type = ev.get("evidence_type", "unknown")
             url_part = f" [{ev.get('source_url', '')}]({ev.get('source_url', '')})" if ev.get("source_url") else ""
             content_preview = (ev.get("content") or "")[:_MD_CONTENT_PREVIEW_LEN].replace("\n", " ")
             tags_part = f" `{'` `'.join(ev.get('tags', []))}`" if ev.get("tags") else ""
-            lines.append(f"- {status_emoji} **[{ev_type}]**{url_part}{tags_part}: {content_preview}...")
+            lines.append(f"- {status_tag} **[{ev_type}]**{url_part}{tags_part}: {content_preview}...")
 
     if leads:
         lines.append(f"\n## Investigation Leads ({len(leads)})\n")
+        sev_label = {"critical": "[CRITICAL]", "high": "[HIGH]", "medium": "[MEDIUM]", "low": "[LOW]"}
         for lead in leads:
-            sev_emoji = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}.get(
-                lead.get("severity", "medium"), "⬜"
-            )
+            sev_tag = sev_label.get(str(lead.get("severity", "medium")).lower(), "[MEDIUM]")
             conf_pct = f"{lead.get('confidence', 0):.0%}"
-            lines.append(f"### {sev_emoji} {lead.get('title', 'Untitled')} *(confidence: {conf_pct})*")
+            lines.append(f"### {sev_tag} {lead.get('title', 'Untitled')} *(confidence: {conf_pct})*")
             lines.append(f"\n{lead.get('description', '')}\n")
             if lead.get("suggested_actions"):
                 lines.append("**Suggested Actions:**")
@@ -3044,21 +3743,8 @@ async def export_investigation_markdown(
         headers={"Content-Disposition": f'attachment; filename="{case_id}_report.md"'},
     )
 
-# Include the router in the main app
-app.include_router(api_router)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-app.add_middleware(GZipMiddleware, minimum_size=1000)
-
-@app.on_event("startup")
-async def create_indexes():
+async def create_mongodb_indexes():
     """Create MongoDB indexes for frequently-queried fields"""
     await db.investigations.create_index("id", unique=True)
     await db.entities.create_index("investigation_id")
@@ -3075,6 +3761,57 @@ async def create_indexes():
     await db.chat_messages.create_index([("investigation_id", 1), ("session_id", 1)])
     logger.info("MongoDB indexes created")
 
-@app.on_event("shutdown")
-async def shutdown_db_client():
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global investigation_engine
+    await create_mongodb_indexes()
+
+    # Initialize investigation engine with db and OSINT search function
+    investigation_engine = InvestigationEngine(db, _osint_search_for_engine)
+    logger.info("Investigation engine initialized")
+
+    yield
     client.close()
+
+
+async def _osint_search_for_engine(query: str, search_type: str) -> dict:
+    """Wrapper for OSINT search used by investigation engine."""
+    import asyncio
+    tasks = [
+        asyncio.create_task(_search_ghosint(query, search_type)),
+        asyncio.create_task(_search_swatted(query, search_type)),
+        asyncio.create_task(_search_bosint(query, search_type)),
+    ]
+    all_results = await asyncio.gather(*tasks)
+
+    results = []
+    for batch in all_results:
+        results.extend(batch)
+
+    return {
+        "query": query,
+        "search_type": search_type,
+        "results": results,
+        "live_data": True
+    }
+
+
+# Main app (lifespan handles index creation and Motor client shutdown)
+app = FastAPI(lifespan=lifespan)
+app.include_router(api_router)
+
+_raw_cors = os.environ.get("CORS_ORIGINS", "*").strip()
+_cors_origins = [o.strip() for o in _raw_cors.split(",") if o.strip()] or ["*"]
+# Browsers reject Access-Control-Allow-Origin: * together with credentialed requests; disable credentials for wildcard.
+_cors_allow_credentials = "*" not in _cors_origins
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_credentials=_cors_allow_credentials,
+    allow_origins=_cors_origins,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.add_middleware(GZipMiddleware, minimum_size=1000)

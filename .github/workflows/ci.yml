@@ -46,8 +46,39 @@ jobs:
           grep -v "emergentintegrations" backend/requirements.txt > /tmp/ci-requirements.txt
           pip install -r /tmp/ci-requirements.txt
 
+      - name: Lint backend
+        run: python -m flake8 backend/server.py --max-line-length=150
+
       - name: Run backend tests
         run: |
           python -m pytest backend/tests/ -v --tb=short
         env:
           PYTHONPATH: ${{ github.workspace }}/backend
+
+  frontend-build:
+    name: Frontend Production Build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "yarn"
+          cache-dependency-path: frontend/yarn.lock
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: yarn install --frozen-lockfile
+
+      - name: Build
+        working-directory: frontend
+        env:
+          REACT_APP_BACKEND_URL: https://ci-build.example.invalid
+          REACT_APP_API_KEY: ci-dummy-api-key
+        run: yarn build

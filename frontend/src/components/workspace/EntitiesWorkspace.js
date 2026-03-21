@@ -7,21 +7,10 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { toast } from 'sonner';
+import { useConfirmDialog } from '@/components/ui/confirm-dialog';
 import axios, { API } from '../../config/api';
 import useInvestigationStore from '../../store/investigationStore';
-
-const ENTITY_TYPES = [
-  { value: 'person', label: 'Person', icon: '👤', color: '#06b6d4' },
-  { value: 'email', label: 'Email', icon: '📧', color: '#14f195' },
-  { value: 'phone', label: 'Phone', icon: '📱', color: '#f97316' },
-  { value: 'domain', label: 'Domain', icon: '🌐', color: '#06b6d4' },
-  { value: 'ip', label: 'IP Address', icon: '🖥️', color: '#7c3aed' },
-  { value: 'username', label: 'Username', icon: '👨‍💻', color: '#14f195' },
-  { value: 'company', label: 'Company', icon: '🏢', color: '#f97316' },
-  { value: 'wallet', label: 'Wallet', icon: '💰', color: '#fbbf24' },
-  { value: 'social', label: 'Social Account', icon: '💬', color: '#3b82f6' },
-  { value: 'url', label: 'URL', icon: '🔗', color: '#06b6d4' },
-];
+import { ENTITY_TYPES, EntityKindIcon } from '@/lib/entityTypes';
 
 const RELATIONSHIP_TYPES = [
   { value: 'owns', label: 'Owns' },
@@ -38,6 +27,7 @@ const RELATIONSHIP_TYPES = [
 
 const EntitiesWorkspace = ({ investigationId, onNavigateToGraph, onNavigateToEvidence }) => {
   const { entities, relationships, addEntity, addRelationship, removeEntity, updateEntity } = useInvestigationStore();
+  const { confirm, dialogProps, ConfirmDialog } = useConfirmDialog();
   
   const [searchQuery, setSearchQuery] = useState('');
   const [showAddDialog, setShowAddDialog] = useState(false);
@@ -156,17 +146,21 @@ const EntitiesWorkspace = ({ investigationId, onNavigateToGraph, onNavigateToEvi
     }
   };
 
-  const handleDeleteEntity = async (entityId, e) => {
+  const handleDeleteEntity = (entityId, e) => {
     e.stopPropagation();
-    if (!window.confirm('Delete this entity and its connections?')) return;
-
-    try {
-      await axios.delete(`${API}/investigations/${investigationId}/entities/${entityId}`);
-      removeEntity(entityId);
-      toast.success('Entity deleted');
-    } catch (error) {
-      toast.error('Failed to delete entity');
-    }
+    confirm({
+      title: 'Delete Entity',
+      description: 'Delete this entity and its connections?',
+      onConfirm: async () => {
+        try {
+          await axios.delete(`${API}/investigations/${investigationId}/entities/${entityId}`);
+          removeEntity(entityId);
+          toast.success('Entity deleted');
+        } catch (error) {
+          toast.error('Failed to delete entity');
+        }
+      },
+    });
   };
 
   const handleOpenEditDialog = (entity, e) => {
@@ -270,6 +264,7 @@ const EntitiesWorkspace = ({ investigationId, onNavigateToGraph, onNavigateToEvi
   }
 
   return (
+    <>
     <div className="h-full flex flex-col">
       {/* Header */}
       <div className="flex items-center justify-between p-4 border-b border-white/5">
@@ -325,7 +320,10 @@ const EntitiesWorkspace = ({ investigationId, onNavigateToGraph, onNavigateToEvi
                         const typeInfo = getTypeInfo(entity.kind);
                         return (
                           <SelectItem key={entity.id} value={entity.id}>
-                            {typeInfo.icon} {entity.label || entity.value}
+                            <span className="flex items-center gap-2">
+                              <EntityKindIcon kind={entity.kind} className="w-4 h-4 shrink-0" style={{ color: typeInfo.color }} />
+                              <span>{entity.label || entity.value}</span>
+                            </span>
                           </SelectItem>
                         );
                       })}
@@ -376,7 +374,10 @@ const EntitiesWorkspace = ({ investigationId, onNavigateToGraph, onNavigateToEvi
                         const typeInfo = getTypeInfo(entity.kind);
                         return (
                           <SelectItem key={entity.id} value={entity.id}>
-                            {typeInfo.icon} {entity.label || entity.value}
+                            <span className="flex items-center gap-2">
+                              <EntityKindIcon kind={entity.kind} className="w-4 h-4 shrink-0" style={{ color: typeInfo.color }} />
+                              <span>{entity.label || entity.value}</span>
+                            </span>
                           </SelectItem>
                         );
                       })}
@@ -444,18 +445,18 @@ const EntitiesWorkspace = ({ investigationId, onNavigateToGraph, onNavigateToEvi
               <div 
                 key={entity.id}
                 data-testid={`entity-card-${entity.id}`}
-                className={`bg-black/40 border rounded-sm overflow-hidden transition-all cursor-pointer ${
+                className={`bg-black/40 border rounded-sm overflow-hidden transition-colors duration-200 cursor-pointer ${
                   isExpanded ? 'border-primary/50' : 'border-white/10 hover:border-white/20'
                 }`}
                 onClick={() => setExpandedEntity(isExpanded ? null : entity.id)}
               >
                 <div className="p-4">
                   <div className="flex items-start gap-3">
-                    <div 
-                      className="w-10 h-10 rounded-full flex items-center justify-center text-xl flex-shrink-0"
+                    <div
+                      className="w-10 h-10 rounded-sm flex items-center justify-center flex-shrink-0"
                       style={{ backgroundColor: `${typeInfo.color}15`, border: `1px solid ${typeInfo.color}30` }}
                     >
-                      {typeInfo.icon}
+                      <EntityKindIcon kind={entity.kind} className="w-5 h-5" style={{ color: typeInfo.color }} />
                     </div>
 
                     <div className="flex-1 min-w-0">
@@ -515,8 +516,9 @@ const EntitiesWorkspace = ({ investigationId, onNavigateToGraph, onNavigateToEvi
                             <ArrowRight className={`w-3 h-3 text-slate-500 ${isSource ? '' : 'rotate-180'}`} />
                             <span className="text-slate-400">{conn.relType.replace('_', ' ')}</span>
                             {connectedEntity && (
-                              <span className="text-white">
-                                {connectedTypeInfo?.icon} {connectedEntity.label || connectedEntity.value}
+                              <span className="text-white inline-flex items-center gap-1.5">
+                                <EntityKindIcon kind={connectedEntity.kind} className="w-3.5 h-3.5 shrink-0" style={{ color: connectedTypeInfo?.color }} />
+                                {connectedEntity.label || connectedEntity.value}
                               </span>
                             )}
                           </div>
@@ -589,6 +591,8 @@ const EntitiesWorkspace = ({ investigationId, onNavigateToGraph, onNavigateToEvi
         </DialogContent>
       </Dialog>
     </div>
+    <ConfirmDialog {...dialogProps} />
+    </>
   );
 };
 
@@ -604,7 +608,10 @@ const EntityForm = ({ newEntity, setNewEntity, onSubmit }) => (
         <SelectContent className="bg-[#0a0a0a] border-white/10 text-white">
           {ENTITY_TYPES.map(type => (
             <SelectItem key={type.value} value={type.value}>
-              {type.icon} {type.label}
+              <span className="flex items-center gap-2">
+                <EntityKindIcon kind={type.value} className="w-4 h-4 shrink-0" style={{ color: type.color }} />
+                <span>{type.label}</span>
+              </span>
             </SelectItem>
           ))}
         </SelectContent>

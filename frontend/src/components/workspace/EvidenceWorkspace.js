@@ -11,6 +11,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { toast } from 'sonner';
+import { useConfirmDialog } from '@/components/ui/confirm-dialog';
 import axios, { API } from '../../config/api';
 import useInvestigationStore from '../../store/investigationStore';
 
@@ -127,6 +128,7 @@ const ENTITY_TYPE_ICONS = {
 
 const EvidenceWorkspace = ({ investigationId, onNavigateToEntities }) => {
   const { evidence, entities, addEvidence, addEntity, removeEvidence, updateEvidence } = useInvestigationStore();
+  const { confirm, dialogProps, ConfirmDialog } = useConfirmDialog();
   
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [showQuickIngest, setShowQuickIngest] = useState(false);
@@ -463,17 +465,21 @@ const EvidenceWorkspace = ({ investigationId, onNavigateToEntities }) => {
     }
   };
 
-  const handleDeleteEvidence = async (evidenceId, e) => {
+  const handleDeleteEvidence = (evidenceId, e) => {
     e.stopPropagation();
-    if (!window.confirm('Delete this evidence?')) return;
-
-    try {
-      await axios.delete(`${API}/investigations/${investigationId}/evidence/${evidenceId}`);
-      removeEvidence(evidenceId);
-      toast.success('Evidence deleted');
-    } catch (error) {
-      toast.error('Failed to delete evidence');
-    }
+    confirm({
+      title: 'Delete Evidence',
+      description: 'Delete this evidence? This cannot be undone.',
+      onConfirm: async () => {
+        try {
+          await axios.delete(`${API}/investigations/${investigationId}/evidence/${evidenceId}`);
+          removeEvidence(evidenceId);
+          toast.success('Evidence deleted');
+        } catch (error) {
+          toast.error('Failed to delete evidence');
+        }
+      },
+    });
   };
 
   const handleUpdateVerification = async (evidenceId, newStatus, e) => {
@@ -592,6 +598,7 @@ const EvidenceWorkspace = ({ investigationId, onNavigateToEntities }) => {
   }
 
   return (
+    <>
     <div 
       className={`h-full flex flex-col ${isDragging ? 'bg-primary/5' : ''}`}
       onDragOver={handleDragOver}
@@ -764,9 +771,31 @@ const EvidenceWorkspace = ({ investigationId, onNavigateToEntities }) => {
                     </div>
                   </div>
 
-                  {/* Expanded: Extract Entities */}
+                  {/* Expanded: Provenance Chain + Extract Entities */}
                   {isExpanded && (
-                    <div className="px-4 pb-4 pt-2 border-t border-white/5 bg-white/[0.02]">
+                    <div className="px-4 pb-4 pt-2 border-t border-white/5 bg-white/[0.02] space-y-3">
+                      {/* Evidence provenance chain */}
+                      {linkedEntities.length > 0 && (
+                        <div>
+                          <span className="text-xs text-cyan-500/80 uppercase tracking-wider font-semibold">Evidence Chain</span>
+                          <div className="mt-2 space-y-1">
+                            {linkedEntities.map(le => (
+                              <div key={le.id} className="flex items-center gap-2 text-xs bg-white/[0.03] border border-white/5 rounded-sm px-2.5 py-1.5">
+                                <div className="w-1.5 h-1.5 rounded-full bg-cyan-500" />
+                                <span className="text-slate-300 font-mono">{le.value}</span>
+                                <Badge variant="secondary" className="bg-white/5 text-slate-500 border-0 text-[9px] ml-auto">{le.kind}</Badge>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {/* Notes */}
+                      {item.notes && (
+                        <div>
+                          <span className="text-xs text-slate-500 uppercase tracking-wider">Notes</span>
+                          <p className="mt-1 text-xs text-slate-400 bg-white/[0.03] rounded-sm p-2 border border-white/5">{item.notes}</p>
+                        </div>
+                      )}
                       <div className="flex items-center justify-between">
                         <span className="text-xs text-slate-500 uppercase tracking-wider">
                           Extract entities from this evidence
@@ -1008,6 +1037,8 @@ const EvidenceWorkspace = ({ investigationId, onNavigateToEntities }) => {
         </DialogContent>
       </Dialog>
     </div>
+    <ConfirmDialog {...dialogProps} />
+    </>
   );
 };
 
@@ -1030,7 +1061,7 @@ const EvidenceForm = ({ categories, selectedCategory, setSelectedCategory, newEv
                 setSelectedCategory(key);
                 setNewEvidence({ ...newEvidence, evidence_type: cat.types[0].value });
               }}
-              className={`p-3 rounded-sm border text-center transition-all ${
+              className={`p-3 rounded-sm border text-center transition-colors duration-200 ${
                 selectedCategory === key
                   ? 'bg-white/10 border-primary/50'
                   : 'bg-white/5 border-white/10 hover:border-white/20'

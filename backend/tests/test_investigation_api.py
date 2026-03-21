@@ -1,11 +1,15 @@
 """
 Backend API Tests for OSINT Investigation Platform
-Tests: Investigations, Entities, Relationships, Evidence, Timeline, AI Analysis
+Tests: Investigations, Entities, Relationships, Evidence, Timeline, AI Analysis, Autonomous investigation
 """
 import pytest
 import requests
 import os
+import sys
 import uuid
+from pathlib import Path
+
+from fastapi.testclient import TestClient
 
 BASE_URL = os.environ.get('REACT_APP_BACKEND_URL', '').rstrip('/')
 API_KEY = "trace-analyst-secret-2026"
@@ -21,6 +25,11 @@ class TestHealthAndAuth:
         assert "message" in data
         assert "status" in data
         print(f"API root: {data}")
+
+    def test_api_root_rejects_missing_key(self):
+        """Test API root requires x-api-key"""
+        response = requests.get(f"{BASE_URL}/api/")
+        assert response.status_code == 401
     
     def test_auth_with_valid_key(self):
         """Test authentication with valid API key"""
@@ -806,6 +815,86 @@ class TestExport:
         assert "# Investigation Report:" in body
         assert "## Entities" in body
         print("Markdown export contains expected sections")
+
+
+def _backend_dir():
+    return Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(scope="module")
+def autonomous_client():
+    """In-process app + lifespan so routes match this checkout (no stale uvicorn)."""
+    backend_dir = str(_backend_dir())
+    if backend_dir not in sys.path:
+        sys.path.insert(0, backend_dir)
+    from server import app  # noqa: E402 — import after sys.path for backend package
+
+    with TestClient(app) as client:
+        yield client
+
+
+class TestAutonomousInvestigation:
+    """Autonomous investigation start + status endpoints."""
+
+    @pytest.fixture
+    def investigation_id(self, autonomous_client):
+        payload = {
+            "name": f"TEST_Auto_{uuid.uuid4().hex[:8]}",
+            "description": "Autonomous endpoint tests",
+        }
+        response = autonomous_client.post(
+            "/api/investigations",
+            json=payload,
+            headers={"x-api-key": API_KEY},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        inv_id = data["id"]
+        yield inv_id
+        autonomous_client.delete(
+            f"/api/investigations/{inv_id}",
+            headers={"x-api-key": API_KEY},
+        )
+
+    def test_auto_status_not_started(self, autonomous_client, investigation_id):
+        """GET auto-status before any run should report not_started when engine is up."""
+        response = autonomous_client.get(
+            f"/api/investigations/{investigation_id}/auto-status",
+            headers={"x-api-key": API_KEY},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data.get("engine_available") is True
+        assert data.get("status") == "not_started"
+
+    def test_auto_investigate_starts(self, autonomous_client, investigation_id):
+        """POST auto-investigate should accept seed and return stream hint."""
+        response = autonomous_client.post(
+            f"/api/investigations/{investigation_id}/auto-investigate",
+            json={
+                "seed_input": "test@example.com",
+                "max_depth": 2,
+                "max_entities": 20,
+                "confidence_threshold": 0.3,
+            },
+            headers={"x-api-key": API_KEY},
+        )
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data.get("success") is True
+        assert data.get("investigation_id") == investigation_id
+        assert "/stream" in (data.get("stream_url") or "")
+
+    def test_auto_investigate_404_unknown_investigation(self, autonomous_client):
+        """Unknown investigation id should 404."""
+        fake_id = str(uuid.uuid4())
+        response = autonomous_client.post(
+            f"/api/investigations/{fake_id}/auto-investigate",
+            json={"seed_input": "x"},
+            headers={"x-api-key": API_KEY},
+        )
+        assert response.status_code == 404
+
 
 # Cleanup test data
 @pytest.fixture(scope="session", autouse=True)

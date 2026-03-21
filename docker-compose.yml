@@ -1,0 +1,15 @@
+# Optional: local MongoDB only. From repo root: docker compose up -d
+# Then set backend/.env: MONGO_URL=mongodb://127.0.0.1:27017  DB_NAME=trace_analyst
+
+services:
+  mongo:
+    image: mongo:7
+    container_name: trace-analyst-mongo
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - trace_analyst_mongo_data:/data/db
+
+volumes:
+  trace_analyst_mongo_data:

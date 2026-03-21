@@ -16,26 +16,15 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { toast } from 'sonner';
+import { useConfirmDialog } from '@/components/ui/confirm-dialog';
 import axios, { API } from '../../config/api';
 import useInvestigationStore from '../../store/investigationStore';
+import { ENTITY_TYPES } from '@/lib/entityTypes';
 import CustomNode from '../CustomNode';
 
 const nodeTypes = {
   custom: CustomNode,
 };
-
-const ENTITY_TYPES = [
-  { value: 'person', label: 'Person', icon: '👤', color: '#06b6d4' },
-  { value: 'email', label: 'Email', icon: '📧', color: '#14f195' },
-  { value: 'phone', label: 'Phone', icon: '📱', color: '#f97316' },
-  { value: 'domain', label: 'Domain', icon: '🌐', color: '#06b6d4' },
-  { value: 'ip', label: 'IP Address', icon: '🖥️', color: '#7c3aed' },
-  { value: 'username', label: 'Username', icon: '👨‍💻', color: '#14f195' },
-  { value: 'company', label: 'Company', icon: '🏢', color: '#f97316' },
-  { value: 'wallet', label: 'Wallet', icon: '💰', color: '#fbbf24' },
-  { value: 'social', label: 'Social Account', icon: '💬', color: '#3b82f6' },
-  { value: 'url', label: 'URL', icon: '🔗', color: '#06b6d4' },
-];
 
 const RELATIONSHIP_TYPES = [
   'owns', 'registered', 'resolves_to', 'used_on', 'interacts_with', 'linked_to', 'employed_by', 'located_at'
@@ -56,6 +45,7 @@ const GraphView = ({ investigationId, onNavigateToEvidence, onNavigateToEntities
   const [showAddEntity, setShowAddEntity] = useState(false);
   const [showAddRelationship, setShowAddRelationship] = useState(false);
   const [selectedNode, setSelectedNode] = useState(null);
+  const { confirm, dialogProps, ConfirmDialog } = useConfirmDialog();
 
   const [newEntity, setNewEntity] = useState({
     entity_type: 'person',
@@ -91,7 +81,6 @@ const GraphView = ({ investigationId, onNavigateToEvidence, onNavigateToEntities
           label: entity.label || entity.value,
           value: entity.value,
           type: entity.kind,
-          icon: typeInfo.icon,
           color: typeInfo.color,
           confidence: entity.confidence,
           risk_score: entity.risk / 100,
@@ -223,17 +212,21 @@ const GraphView = ({ investigationId, onNavigateToEvidence, onNavigateToEntities
     }
   };
 
-  const handleDeleteEntity = async (entityId) => {
-    if (!window.confirm('Delete this entity and its connections?')) return;
-
-    try {
-      await axios.delete(`${API}/investigations/${investigationId}/entities/${entityId}`);
-      removeEntity(entityId);
-      setSelectedNode(null);
-      toast.success('Entity deleted');
-    } catch (error) {
-      toast.error('Failed to delete entity');
-    }
+  const handleDeleteEntity = (entityId) => {
+    confirm({
+      title: 'Delete Entity',
+      description: 'Delete this entity and its connections?',
+      onConfirm: async () => {
+        try {
+          await axios.delete(`${API}/investigations/${investigationId}/entities/${entityId}`);
+          removeEntity(entityId);
+          setSelectedNode(null);
+          toast.success('Entity deleted');
+        } catch (error) {
+          toast.error('Failed to delete entity');
+        }
+      },
+    });
   };
 
   // Empty state - guide users to build the investigation first
@@ -377,7 +370,7 @@ const GraphView = ({ investigationId, onNavigateToEvidence, onNavigateToEntities
                     <SelectContent className="bg-[#0a0a0a] border-white/10 text-white">
                       {ENTITY_TYPES.map(type => (
                         <SelectItem key={type.value} value={type.value}>
-                          {type.icon} {type.label}
+                          {type.label}
                         </SelectItem>
                       ))}
                     </SelectContent>
@@ -574,6 +567,7 @@ const GraphView = ({ investigationId, onNavigateToEvidence, onNavigateToEntities
           </div>
         </div>
       )}
+      <ConfirmDialog {...dialogProps} />
     </div>
   );
 };

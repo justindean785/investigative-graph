@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Plus, Search, FolderOpen, Clock, Settings } from 'lucide-react';
+import { Plus, Search, FolderOpen, Clock, Settings, Trash2, CheckSquare, Square } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { useConfirmDialog } from '@/components/ui/confirm-dialog';
 import { Label } from '@/components/ui/label';
 import { toast } from 'sonner';
 import axios, { API } from '../config/api';
@@ -14,6 +15,9 @@ const Dashboard = () => {
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [showCreateDialog, setShowCreateDialog] = useState(false);
+  const [selectedIds, setSelectedIds] = useState(new Set());
+  const [deleting, setDeleting] = useState(false);
+  const { confirm, dialogProps, ConfirmDialog } = useConfirmDialog();
   const [newInvestigation, setNewInvestigation] = useState({
     name: '',
     description: '',
@@ -30,7 +34,12 @@ const Dashboard = () => {
       setInvestigations(response.data);
     } catch (error) {
       console.error('Failed to fetch investigations:', error);
-      toast.error('Failed to load investigations');
+      toast.error(
+        error.code === 'ECONNABORTED'
+          ? 'Backend timed out. Is MongoDB running on port 27017?'
+          : 'Failed to load investigations'
+      );
+      setInvestigations([]); // Show empty state so UI is usable
     } finally {
       setLoading(false);
     }
@@ -54,6 +63,50 @@ const Dashboard = () => {
     }
   };
 
+  const toggleSelection = (id) => {
+    const newSelected = new Set(selectedIds);
+    if (newSelected.has(id)) {
+      newSelected.delete(id);
+    } else {
+      newSelected.add(id);
+    }
+    setSelectedIds(newSelected);
+  };
+
+  const selectAll = () => {
+    if (selectedIds.size === filteredInvestigations.length) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(filteredInvestigations.map(inv => inv.id)));
+    }
+  };
+
+  const deleteSelected = () => {
+    if (selectedIds.size === 0) return;
+    confirm({
+      title: 'Delete Investigations',
+      description: `Delete ${selectedIds.size} investigation(s)? This cannot be undone.`,
+      onConfirm: async () => {
+        setDeleting(true);
+        try {
+          await Promise.all(
+            Array.from(selectedIds).map(id =>
+              axios.delete(`${API}/investigations/${id}`)
+            )
+          );
+          toast.success(`Deleted ${selectedIds.size} investigation(s)`);
+          setSelectedIds(new Set());
+          fetchInvestigations();
+        } catch (error) {
+          console.error('Failed to delete investigations:', error);
+          toast.error('Failed to delete some investigations');
+        } finally {
+          setDeleting(false);
+        }
+      },
+    });
+  };
+
   const filteredInvestigations = useMemo(() => investigations.filter(inv =>
     inv.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
     inv.description.toLowerCase().includes(searchQuery.toLowerCase())
@@ -65,7 +118,7 @@ const Dashboard = () => {
   };
 
   return (
-    <div className="h-screen flex flex-col bg-[#050505]">
+    <div id="main-content" className="h-screen flex flex-col bg-[#050505]">
       {/* Header */}
       <header className="h-12 border-b border-white/5 flex items-center justify-between px-4 bg-black/50 backdrop-blur-sm flex-shrink-0">
         <div className="flex items-center gap-4">
@@ -137,8 +190,9 @@ const Dashboard = () => {
         {/* Main Content */}
         <main className="flex-1 overflow-y-auto p-8">
           {loading ? (
-            <div className="flex items-center justify-center h-full">
-              <div className="loading-spinner w-12 h-12"></div>
+            <div className="flex flex-col items-center justify-center h-full gap-4">
+              <div className="loading-spinner w-12 h-12" aria-hidden />
+              <p className="text-sm text-slate-400">Loading investigations...</p>
             </div>
           ) : filteredInvestigations.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full">
@@ -157,42 +211,107 @@ const Dashboard = () => {
             </div>
           ) : (
             <div className="space-y-6">
-              <div>
-                <h1 className="text-3xl font-heading font-bold text-white mb-2">Investigations</h1>
-                <p className="text-sm text-slate-400">Manage and track your intelligence cases</p>
+              <div className="flex items-center justify-between">
+                <div>
+                  <h1 className="text-3xl font-heading font-bold text-white mb-2">Investigations</h1>
+                  <p className="text-sm text-slate-400">Manage and track your intelligence cases</p>
+                </div>
+                
+                {selectedIds.size > 0 && (
+                  <div className="flex items-center gap-3">
+                    <span className="text-sm text-slate-400">{selectedIds.size} selected</span>
+                    <Button
+                      onClick={deleteSelected}
+                      disabled={deleting}
+                      variant="destructive"
+                      className="bg-red-500/10 text-red-400 hover:bg-red-500/20 border border-red-500/30"
+                    >
+                      {deleting ? (
+                        <span className="flex items-center gap-2">
+                          <div className="loading-spinner w-3 h-3" />
+                          Deleting...
+                        </span>
+                      ) : (
+                        <>
+                          <Trash2 className="w-4 h-4 mr-2" />
+                          Delete Selected
+                        </>
+                      )}
+                    </Button>
+                  </div>
+                )}
+              </div>
+
+              <div className="flex items-center gap-2 mb-4">
+                <Button
+                  onClick={selectAll}
+                  variant="ghost"
+                  className="text-slate-400 hover:text-white text-xs h-7"
+                >
+                  {selectedIds.size === filteredInvestigations.length && filteredInvestigations.length > 0 ? (
+                    <>
+                      <CheckSquare className="w-3 h-3 mr-1" />
+                      Deselect All
+                    </>
+                  ) : (
+                    <>
+                      <Square className="w-3 h-3 mr-1" />
+                      Select All
+                    </>
+                  )}
+                </Button>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                 {filteredInvestigations.map(inv => (
                   <div
                     key={inv.id}
-                    onClick={() => navigate(`/investigation/${inv.id}`)}
-                    className="glass rounded-sm p-5 hover:border-primary/30 cursor-pointer transition-all group"
+                    className="glass rounded-sm p-5 hover:border-primary/30 cursor-pointer transition-colors duration-200 group relative"
                   >
-                    <div className="flex items-start justify-between mb-3">
-                      <div className="flex-1">
-                        <h3 className="text-base font-heading font-semibold text-white group-hover:text-primary transition-colors mb-1">
-                          {inv.name}
-                        </h3>
-                        <p className="text-xs font-mono text-slate-500">{inv.case_id}</p>
-                      </div>
-                      <div className={`text-xs px-2 py-1 rounded-sm ${
-                        inv.status === 'active' 
-                          ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' 
-                          : 'bg-slate-500/10 text-slate-400 border border-slate-500/20'
-                      }`}>
-                        {inv.status}
-                      </div>
+                    {/* Selection Checkbox */}
+                    <div 
+                      className="absolute top-3 left-3 z-10"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleSelection(inv.id);
+                      }}
+                    >
+                      {selectedIds.has(inv.id) ? (
+                        <CheckSquare className="w-5 h-5 text-primary" />
+                      ) : (
+                        <Square className="w-5 h-5 text-slate-600 hover:text-slate-400" />
+                      )}
                     </div>
 
-                    {inv.description && (
-                      <p className="text-sm text-slate-400 mb-4 line-clamp-2">{inv.description}</p>
-                    )}
+                    <div 
+                      onClick={() => navigate(`/investigation/${inv.id}`)}
+                      className="pl-6"
+                    >
+                      <div className="flex items-start justify-between mb-3">
+                        <div className="flex-1">
+                          <h3 className="text-base font-heading font-semibold text-white group-hover:text-primary transition-colors mb-1">
+                            {inv.name}
+                          </h3>
+                          <p className="text-xs font-mono text-slate-500">{inv.case_id}</p>
+                        </div>
+                        <div className={`text-xs px-2 py-1 rounded-sm ${
+                          inv.status === 'active' 
+                            ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' 
+                            : 'bg-slate-500/10 text-slate-400 border border-slate-500/20'
+                        }`}>
+                          {inv.status}
+                        </div>
+                      </div>
 
-                    <div className="flex items-center justify-between pt-3 border-t border-white/5">
-                      <div className="flex items-center gap-1 text-xs text-slate-500">
-                        <Clock className="w-3 h-3" />
-                        {formatDate(inv.created_at)}
+                      {inv.description && (
+                        <p className="text-sm text-slate-400 mb-4 line-clamp-2">{inv.description}</p>
+                      )}
+
+                      <div className="flex items-center justify-between pt-3 border-t border-white/5">
+                        <div className="flex items-center gap-1 text-xs text-slate-500">
+                          <Clock className="w-3 h-3" />
+                          {formatDate(inv.created_at)}
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -217,7 +336,7 @@ const Dashboard = () => {
                 onChange={(e) => setNewInvestigation({ ...newInvestigation, name: e.target.value })}
                 className="bg-black/50 border-white/10 focus:border-primary/50 text-white"
                 placeholder="Enter investigation name"
-                onKeyPress={(e) => e.key === 'Enter' && createInvestigation()}
+                onKeyDown={(e) => e.key === 'Enter' && createInvestigation()}
               />
             </div>
             <div>
@@ -238,6 +357,7 @@ const Dashboard = () => {
           </div>
         </DialogContent>
       </Dialog>
+      <ConfirmDialog {...dialogProps} />
     </div>
   );
 };
