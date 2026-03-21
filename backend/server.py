@@ -2024,7 +2024,8 @@ Format as JSON array with structure:
             
             suggestions_data = json.loads(response_text)
             
-            # Store suggestions in database
+            # Store suggestions in database and return ids to the client for later status updates
+            stored_suggestions: List[Dict[str, Any]] = []
             for sug_data in suggestions_data:
                 suggestion = AISuggestion(
                     investigation_id=input.investigation_id,
@@ -2035,6 +2036,12 @@ Format as JSON array with structure:
                 )
                 doc = serialize_datetime(suggestion.model_dump())
                 await db.ai_suggestions.insert_one(doc)
+                stored_suggestions.append({
+                    **(sug_data or {}),
+                    "id": suggestion.id,
+                    "status": suggestion.status,
+                    "created_at": suggestion.created_at.isoformat(),
+                })
             
             await create_timeline_event(
                 input.investigation_id,
@@ -2045,8 +2052,8 @@ Format as JSON array with structure:
             return {
                 "success": True,
                 "model_used": model_name,
-                "suggestions_count": len(suggestions_data),
-                "suggestions": suggestions_data
+                "suggestions_count": len(stored_suggestions),
+                "suggestions": stored_suggestions
             }
         except json.JSONDecodeError:
             # Fallback: create generic suggestion from raw response text

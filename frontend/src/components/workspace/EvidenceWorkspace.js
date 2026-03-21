@@ -521,6 +521,17 @@ const EvidenceWorkspace = ({ investigationId, onNavigateToEntities, searchQuery:
     return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
   };
 
+  const filteredEvidence = useMemo(() => {
+    if (!globalSearchQuery) return evidence;
+    const q = globalSearchQuery.toLowerCase();
+    return evidence.filter(item =>
+      (item.content || '').toLowerCase().includes(q) ||
+      (item.type || '').toLowerCase().includes(q) ||
+      (item.title || '').toLowerCase().includes(q) ||
+      (item.sourceUrl || '').toLowerCase().includes(q)
+    );
+  }, [evidence, globalSearchQuery]);
+
   // Empty state
   if (evidence.length === 0) {
     return (
@@ -631,7 +642,7 @@ const EvidenceWorkspace = ({ investigationId, onNavigateToEntities, searchQuery:
           <FileBox className="w-5 h-5 text-primary" />
           <h2 className="text-lg font-heading font-bold text-white">Evidence</h2>
           <Badge variant="secondary" className="bg-primary/10 text-primary border-0">
-            {evidence.length}
+            {filteredEvidence.length}{globalSearchQuery ? ` / ${evidence.length}` : ''}
           </Badge>
         </div>
 
@@ -689,16 +700,16 @@ const EvidenceWorkspace = ({ investigationId, onNavigateToEntities, searchQuery:
       <div className="flex-1 flex overflow-hidden">
         {/* Evidence List */}
         <div className={`flex-1 overflow-y-auto p-4 ${showDetectedPanel ? 'border-r border-white/5' : ''}`}>
+          {globalSearchQuery && filteredEvidence.length === 0 ? (
+            <div className="h-full flex items-center justify-center text-center">
+              <div>
+                <p className="text-sm text-slate-300">No evidence matches "{globalSearchQuery}".</p>
+                <p className="text-xs text-slate-500 mt-1">Try a different keyword or clear search.</p>
+              </div>
+            </div>
+          ) : (
           <div className="space-y-3">
-            {(globalSearchQuery
-              ? evidence.filter(item =>
-                  (item.content || '').toLowerCase().includes(globalSearchQuery.toLowerCase()) ||
-                  (item.type || '').toLowerCase().includes(globalSearchQuery.toLowerCase()) ||
-                  (item.title || '').toLowerCase().includes(globalSearchQuery.toLowerCase()) ||
-                  (item.sourceUrl || '').toLowerCase().includes(globalSearchQuery.toLowerCase())
-                )
-              : evidence
-            ).map(item => {
+            {filteredEvidence.map(item => {
               const typeInfo = getTypeInfo(item.type);
               const isExpanded = expandedEvidence === item.id;
               const linkedEntities = entities.filter(e => item.linked?.entityIds?.includes(e.id));
@@ -840,6 +851,7 @@ const EvidenceWorkspace = ({ investigationId, onNavigateToEntities, searchQuery:
               );
             })}
           </div>
+          )}
         </div>
 
         {/* Detected Entities Panel */}

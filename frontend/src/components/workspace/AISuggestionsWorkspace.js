@@ -36,18 +36,37 @@ const AISuggestionsWorkspace = ({ investigationId, onNavigateToEvidence }) => {
       });
 
       if (response.data.success) {
-        // Convert API suggestions to store format
-        const suggestions = response.data.suggestions?.map((sug, idx) => ({
-          id: `sug-${Date.now()}-${idx}`,
-          type: sug.suggestion_type || 'lead',
-          title: sug.title,
-          description: sug.description,
-          confidence: sug.confidence || 0.7,
-          actions: sug.action_data ? [{ kind: 'CUSTOM', payload: sug.action_data }] : [],
-          status: 'pending',
-        })) || [];
+        // Convert API suggestions to store format (use backend ids so accept/dismiss persists)
+        const suggestions = response.data.suggestions?.map((sug) => {
+          const actionData = sug.action_data || {};
+          const actions = [];
 
-        setAISuggestions([...aiSuggestions, ...suggestions]);
+          // Heuristic mapping so we can persist actions without breaking older payload shapes.
+          if (actionData.entity_type && actionData.value) {
+            actions.push({ kind: 'ADD_ENTITY', payload: actionData });
+          } else if (actionData.source_entity_id && actionData.target_entity_id) {
+            actions.push({ kind: 'ADD_EDGE', payload: actionData });
+          } else if (Object.keys(actionData).length > 0) {
+            actions.push({ kind: 'CUSTOM', payload: actionData });
+          }
+
+          return {
+            id: sug.id,
+            type: sug.suggestion_type || 'lead',
+            title: sug.title,
+            description: sug.description,
+            confidence: sug.confidence || 0.7,
+            action_data: actionData,
+            actions,
+            status: sug.status || 'pending',
+            created_at: sug.created_at,
+          };
+        }) || [];
+
+        // Keep existing non-duplicate suggestions (by backend id), then append the newest batch.
+        const existingById = new Set(suggestions.map(s => s.id));
+        const retained = aiSuggestions.filter(s => !existingById.has(s.id));
+        setAISuggestions([...retained, ...suggestions]);
         toast.success(`AI analysis complete! ${response.data.suggestions_count || suggestions.length} suggestions generated`);
       }
     } catch (error) {
@@ -67,7 +86,7 @@ const AISuggestionsWorkspace = ({ investigationId, onNavigateToEvidence }) => {
       });
 
       // Persist any ADD_ENTITY / ADD_EDGE actions carried in action_data
-      if (suggestion?.actions) {
+      if (suggestion?.actions?.length) {
         for (const action of suggestion.actions) {
           if (action.kind === 'ADD_ENTITY' && action.payload?.entity_type && action.payload?.value) {
             try {
