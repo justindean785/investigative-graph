@@ -3269,11 +3269,9 @@ async def export_investigation_markdown(
     if leads:
         lines.append(f"\n## Investigation Leads ({len(leads)})\n")
         for lead in leads:
-            sev_emoji = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}.get(
-                lead.get("severity", "medium"), "⬜"
-            )
+            severity = (lead.get("severity") or "medium").upper()
             conf_pct = f"{lead.get('confidence', 0):.0%}"
-            lines.append(f"### {sev_emoji} {lead.get('title', 'Untitled')} *(confidence: {conf_pct})*")
+            lines.append(f"### [{severity}] {lead.get('title', 'Untitled')} *(confidence: {conf_pct})*")
             lines.append(f"\n{lead.get('description', '')}\n")
             if lead.get("suggested_actions"):
                 lines.append("**Suggested Actions:**")

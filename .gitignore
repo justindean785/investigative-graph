@@ -3,6 +3,7 @@
 # IDE and editors
 .idea/
 .vscode/
+.cursor/
 
 # Dependencies
 node_modules/
@@ -81,5 +82,7 @@ android-sdk/ -e
 # Environment files
 *.env
 *.env.*
+!backend/.env.example
+!frontend/.env.example
 node_modules/
 package-lock.json
