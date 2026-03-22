@@ -1,32 +1,61 @@
 # Code Audit Report — Trace Analyst Platform
 
-**Date:** 2026-03-20  
+**Original Audit Date:** 2026-03-20  
+**Implementation Update:** 2026-03-22  
 **Auditor:** Code Audit Agent  
-**Scope:** Full codebase — `backend/server.py` (~3,081 lines), all `frontend/src/` files, backend test suite  
-**Health Rating:** 🟡 **Needs Attention**
+**Scope:** Full codebase — `backend/server.py` (~3,326 lines), all `frontend/src/` files, backend test suite  
+**Health Rating:** 🟢 **Good** (all identified issues resolved)
+
+---
+
+## Implementation Status Summary
+
+All bugs and improvements identified in this report have been implemented as of 2026-03-22. The table below tracks each finding's current status.
+
+| ID | Finding | Original Severity | Status |
+|----|---------|------------------|--------|
+| BUG-01 | SSRF via URL Ingest Endpoint | 🔴 Critical | ✅ Fixed |
+| BUG-02 | Open CORS Policy | 🔴 Critical | ✅ Fixed |
+| BUG-03 | API Key Hardcoded in Frontend Bundle | 🔴 Critical | ✅ Fixed |
+| BUG-04 | Accepted AI Suggestions Lost on Refresh | 🟡 High | ✅ Fixed |
+| BUG-05 | Global Search Bar Not Functional | 🟡 High | ✅ Fixed |
+| BUG-06 | Suggestion Status No Validation | 🟡 Medium | ✅ Fixed |
+| BUG-07 | No Parent Investigation Check | 🟡 Medium | ✅ Fixed |
+| BUG-08 | Global Random Seed Race Condition | 🟡 Medium | ✅ Fixed |
+| BUG-09 | AI Chat Re-Sends Full History | 🟢 Low | ✅ Fixed |
+| BUG-10 | BFS Path-Finding Uses Slow List Queue | 🟢 Low | ✅ Fixed |
+| BUG-11 | Evidence Categories Duplicated Frontend/Backend | 🟢 Low | ✅ Fixed |
+| BUG-12 | AI Chat Prompt Injection | 🟡 Medium | ✅ Fixed |
+| CI | Frontend build fails (yarn.lock out of date) | 🔴 Build Blocker | ✅ Fixed |
+
+**Security regression tests added:** `backend/tests/test_security.py` — 13 tests covering SSRF protection, suggestion status validation, and orphan resource prevention.
 
 ---
 
 ## 1. Executive Summary
 
-Trace Analyst is a well-structured OSINT investigation platform with a clear separation of concerns, proper async I/O throughout the backend, solid test coverage for the core API, and a polished React frontend. However, **the codebase has several security vulnerabilities that would be immediately exploitable in a real deployment**, the most serious being a Server-Side Request Forgery (SSRF) hole in the URL ingestion endpoint and an open CORS policy that allows any website to interact with the API. Beyond security, there are **data integrity bugs** that silently discard investigator work (accepted AI suggestions are lost on page refresh) and **non-functional UI elements** (the global search bar has no wiring and searches nothing). These issues should be resolved before placing sensitive investigation data on this system.
+Trace Analyst is a well-structured OSINT investigation platform with a clear separation of concerns, proper async I/O throughout the backend, solid test coverage for the core API, and a polished React frontend. **All security vulnerabilities, data integrity bugs, and functional issues identified in this audit have been resolved.** The most critical fixes include: an SSRF blocklist that prevents the URL ingest endpoint from probing internal servers; restricting the default CORS policy from `*` to `http://localhost:3000`; removing the hardcoded API key fallback from the frontend JavaScript bundle; and persisting accepted AI suggestion actions to the backend database. A security regression test suite (`backend/tests/test_security.py`) was added to prevent regressions.
+
+**Original assessment (2026-03-20):** The codebase had several security vulnerabilities that would be immediately exploitable in a real deployment. These issues have now been addressed.
 
 ---
 
 ## 2. Key Risks
 
-| # | Risk | Severity |
-|---|------|----------|
-| 1 | URL ingest can be used to probe internal servers (SSRF) | 🔴 Critical |
-| 2 | Default CORS policy allows any website to call the API | 🔴 Critical |
-| 3 | Default API key is baked into the frontend JavaScript bundle | 🔴 Critical |
-| 4 | Accepted AI suggestion entities/edges are silently lost on page refresh | 🟡 High |
-| 5 | Global search bar in workspace does not search anything | 🟡 High |
-| 6 | No validation on enum-like fields — invalid data can be stored | 🟡 High |
-| 7 | AI chat context is vulnerable to prompt injection via entity values | 🟡 High |
-| 8 | Concurrent enrichment requests share a global random seed (race condition) | 🟡 Medium |
-| 9 | No pagination — large investigations can cause memory exhaustion | 🟡 Medium |
-| 10 | AI chat re-sends full history on every message, increasing token cost linearly | 🟢 Low |
+All risks identified below have been resolved. The table is retained for historical reference.
+
+| # | Risk | Original Severity | Status |
+|---|------|------------------|--------|
+| 1 | URL ingest can be used to probe internal servers (SSRF) | 🔴 Critical | ✅ Fixed |
+| 2 | Default CORS policy allows any website to call the API | 🔴 Critical | ✅ Fixed |
+| 3 | Default API key is baked into the frontend JavaScript bundle | 🔴 Critical | ✅ Fixed |
+| 4 | Accepted AI suggestion entities/edges are silently lost on page refresh | 🟡 High | ✅ Fixed |
+| 5 | Global search bar in workspace does not search anything | 🟡 High | ✅ Fixed |
+| 6 | No validation on enum-like fields — invalid data can be stored | 🟡 High | ✅ Fixed |
+| 7 | AI chat context is vulnerable to prompt injection via entity values | 🟡 High | ✅ Fixed |
+| 8 | Concurrent enrichment requests share a global random seed (race condition) | 🟡 Medium | ✅ Fixed |
+| 9 | No pagination — large investigations can cause memory exhaustion | 🟡 Medium | ✅ Fixed |
+| 10 | AI chat re-sends full history on every message, increasing token cost linearly | 🟢 Low | ✅ Fixed |
 
 ---
 
