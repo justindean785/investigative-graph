@@ -61,6 +61,17 @@ let webpackConfig = {
 };
 
 webpackConfig.devServer = (devServerConfig) => {
+  // Gate allowedHosts behind the ALLOWED_HOSTS env var so host-checking is
+  // enabled by default (DNS-rebinding-safe).  Tunnel workflows that need
+  // 'all' must opt in explicitly via ALLOWED_HOSTS=all.
+  if (process.env.ALLOWED_HOSTS) {
+    const hosts = process.env.ALLOWED_HOSTS.split(',')
+      .map((h) => h.trim())
+      .filter(Boolean);
+    devServerConfig.allowedHosts =
+      hosts.length === 1 && hosts[0] === 'all' ? 'all' : hosts;
+  }
+
   // Add health check endpoints if enabled
   if (config.enableHealthCheck && setupHealthEndpoints && healthPluginInstance) {
     const originalSetupMiddlewares = devServerConfig.setupMiddlewares;

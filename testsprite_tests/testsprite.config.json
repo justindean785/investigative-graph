@@ -1,0 +1,17 @@
+{
+  "version": "1.0",
+  "project": "trace-analyst",
+  "description": "TestSprite configuration for Trace Analyst OSINT platform",
+  "backend": {
+    "url": "http://localhost:8001",
+    "apiKey": "trace-analyst-secret-2026",
+    "testDir": "testsprite_tests/backend"
+  },
+  "frontend": {
+    "url": "http://localhost:3000",
+    "testDir": "testsprite_tests/frontend"
+  },
+  "coverage": {
+    "threshold": 80
+  }
+}
