@@ -7,12 +7,20 @@ Trace Analyst is an AI-powered OSINT (Open Source Intelligence) investigation pl
 
 | Service | Command | Port | Notes |
 |---------|---------|------|-------|
-| MongoDB | `mongod --dbpath /tmp/mongodb/data --logpath /tmp/mongodb/log/mongod.log --fork --bind_ip 127.0.0.1` | 27017 | Must start before backend |
+| MongoDB | See **Database** below (Docker, Atlas, or local `mongod`) | 27017 | Must be reachable before backend |
 | Backend | `cd /workspace/backend && uvicorn server:app --host 0.0.0.0 --port 8001 --reload` | 8001 | Requires `MONGO_URL` and `DB_NAME` env vars (loaded from `backend/.env`) |
 | Frontend | `cd /workspace/frontend && BROWSER=none yarn start` | 3000 | Requires `REACT_APP_BACKEND_URL` and `REACT_APP_API_KEY` (same value as backend `API_KEY`; see `frontend/.env.example`) |
 
+### Database (you do not need MongoDB installed on the host)
+
+1. **Docker (easiest):** From the repo root run `docker compose -f docker-compose.mongodb.yml up -d` (or `./scripts/start-mongodb-docker.sh`). Uses port **27017**. Stop with `docker compose -f docker-compose.mongodb.yml down`.
+2. **MongoDB Atlas:** Create a free cluster, then set `MONGO_URL` to your Atlas connection string in `backend/.env` (see `backend/.env.example`).
+3. **Local install:** Install `mongod` and run it on `127.0.0.1:27017` if you prefer.
+
+**Integration tests:** If `mongod` is not installed, `conftest.py` tries to start the same Docker Compose MongoDB automatically (requires Docker). If you already run the API yourself, set `REACT_APP_BACKEND_URL` before pytest to skip auto-start.
+
 ### Environment files
-- `backend/.env` — Must contain `MONGO_URL=mongodb://localhost:27017` and `DB_NAME=trace_analyst`. Optional: `EMERGENT_LLM_KEY` for AI chat features.
+- `backend/.env` — Copy from `backend/.env.example`. Must include `MONGO_URL` and `DB_NAME=trace_analyst`. Optional: `EMERGENT_LLM_KEY` / `GEMINI_API_KEY` for AI chat features.
 - `frontend/.env` — Must contain `REACT_APP_BACKEND_URL` and `REACT_APP_API_KEY` (must match backend `API_KEY`). Copy from `frontend/.env.example`.
 
 ### Non-obvious caveats

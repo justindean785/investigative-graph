@@ -34,6 +34,7 @@ MONGO_LOG = os.path.join(_TMP, "test_mongodb.log")
 _mongo_proc = None
 _server_proc = None
 _env_created = False
+_mongo_docker_started = False
 
 
 def _find_mongod():
@@ -76,6 +77,53 @@ def _wait_for_http(url, timeout=30, headers=None):
         except _requests.ConnectionError:
             time.sleep(0.5)
     return False
+
+
+def _try_start_mongodb_docker():
+    """Start MongoDB via Docker Compose if mongod is missing and Docker is available."""
+    global _mongo_docker_started
+    compose_file = os.path.join(os.path.dirname(BACKEND_DIR), "docker-compose.mongodb.yml")
+    if not os.path.isfile(compose_file):
+        return False
+    docker = shutil.which("docker")
+    if not docker:
+        return False
+    try:
+        subprocess.run(
+            [docker, "compose", "-f", compose_file, "up", "-d"],
+            cwd=os.path.dirname(compose_file),
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=120,
+        )
+        _mongo_docker_started = True
+        return True
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+
+
+def _stop_mongodb_docker():
+    """Stop Docker Compose MongoDB if we started it in this session."""
+    global _mongo_docker_started
+    if not _mongo_docker_started:
+        return
+    compose_file = os.path.join(os.path.dirname(BACKEND_DIR), "docker-compose.mongodb.yml")
+    docker = shutil.which("docker")
+    if not docker or not os.path.isfile(compose_file):
+        return
+    try:
+        subprocess.run(
+            [docker, "compose", "-f", compose_file, "down"],
+            cwd=os.path.dirname(compose_file),
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=60,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    _mongo_docker_started = False
 
 
 def _ensure_emergent_stub():
@@ -168,10 +216,21 @@ def pytest_configure(config):
                 raise RuntimeError("MongoDB failed to start")
     else:
         if not _wait_for_port("127.0.0.1", MONGO_PORT, timeout=2):
-            raise RuntimeError(
-                "mongod binary not found and MongoDB is not running on port 27017. "
-                "Install MongoDB or start it before running tests."
-            )
+            if _try_start_mongodb_docker():
+                if not _wait_for_port("127.0.0.1", MONGO_PORT, timeout=45):
+                    _stop_mongodb_docker()
+                    raise RuntimeError(
+                        "Started MongoDB via Docker but port 27017 did not become ready. "
+                        "Check: docker compose -f docker-compose.mongodb.yml logs"
+                    )
+            else:
+                raise RuntimeError(
+                    "MongoDB is not running on port 27017 and mongod was not found. "
+                    "Either: (1) docker compose -f docker-compose.mongodb.yml up -d "
+                    "from the repo root, (2) install MongoDB locally, or (3) set "
+                    "MONGO_URL to MongoDB Atlas in backend/.env and start the API "
+                    "yourself with REACT_APP_BACKEND_URL already set when running tests."
+                )
 
     # 3. Write .env if needed
     env_path = os.path.join(BACKEND_DIR, ".env")
@@ -237,6 +296,8 @@ def pytest_unconfigure(config):
             _mongo_proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             _mongo_proc.kill()
+
+    _stop_mongodb_docker()
 
     if _env_created:
         env_path = os.path.join(BACKEND_DIR, ".env")
