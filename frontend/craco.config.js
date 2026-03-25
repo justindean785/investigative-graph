@@ -78,8 +78,14 @@ webpackConfig.devServer = (devServerConfig) => {
     };
   }
 
-  // Allow ngrok and other tunnel hosts (fixes "Invalid Host header" when proxying)
-  devServerConfig.allowedHosts = 'all';
+  // Allow tunnel/proxy hosts only when explicitly configured via ALLOWED_HOSTS.
+  // Set ALLOWED_HOSTS to a comma-separated list of host names (e.g. "abc.ngrok.io")
+  // or to "all" to disable host checking entirely (insecure – DNS rebinding risk).
+  // If unset, the default CRA/webpack-dev-server allowlist is used (safest).
+  if (process.env.ALLOWED_HOSTS) {
+    const hosts = process.env.ALLOWED_HOSTS.split(',').map((h) => h.trim()).filter(Boolean);
+    devServerConfig.allowedHosts = hosts.length === 1 && hosts[0] === 'all' ? 'all' : hosts;
+  }
 
   return devServerConfig;
 };
