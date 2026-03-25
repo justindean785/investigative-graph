@@ -13,7 +13,7 @@ Trace Analyst is an AI-powered OSINT (Open Source Intelligence) investigation pl
 
 ### Database (you do not need MongoDB installed on the host)
 
-1. **Docker (easiest):** From the repo root run `docker compose -f docker-compose.mongodb.yml up -d` (or `./scripts/start-mongodb-docker.sh`). Uses port **27017**. Stop with `docker compose -f docker-compose.mongodb.yml down`.
+1. **Docker Compose (full stack):** From the repo root run `docker compose up -d` (see `docker-compose.yml` — includes MongoDB, backend, frontend). For MongoDB only when developing backend against a container, run a `mongo:7` container on port **27017** yourself or use Atlas below.
 2. **MongoDB Atlas:** Create a free cluster, then set `MONGO_URL` to your Atlas connection string in `backend/.env` (see `backend/.env.example`).
 3. **Local install:** Install `mongod` and run it on `127.0.0.1:27017` if you prefer.
 
