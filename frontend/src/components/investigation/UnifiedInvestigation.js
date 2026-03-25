@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Network, Users, FileText, Shield, Settings, Save, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -21,7 +21,8 @@ const UnifiedInvestigation = () => {
   const [showCasePanel, setShowCasePanel] = useState(false);
   const [caseNotes, setCaseNotes] = useState('');
   const [savingNotes, setSavingNotes] = useState(false);
-  
+  const lastStreamRefreshRef = useRef(0);
+
   const {
     investigation,
     entities,
@@ -106,11 +107,36 @@ const UnifiedInvestigation = () => {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, navigate]);
 
+  const refreshFromStream = useCallback(() => {
+    const now = Date.now();
+    if (now - lastStreamRefreshRef.current < 1500) return;
+    lastStreamRefreshRef.current = now;
+    loadInvestigation();
+  }, [loadInvestigation]);
+
   useEffect(() => {
     loadInvestigation();
-    const pollInterval = setInterval(loadInvestigation, 3000);
+
+    const pollVisibleMs = 8000;
+    const pollHiddenMs = 30000;
+    let intervalId;
+
+    const tick = () => {
+      loadInvestigation();
+    };
+
+    const reschedule = () => {
+      clearInterval(intervalId);
+      const ms = document.visibilityState === 'hidden' ? pollHiddenMs : pollVisibleMs;
+      intervalId = setInterval(tick, ms);
+    };
+
+    reschedule();
+    document.addEventListener('visibilitychange', reschedule);
+
     return () => {
-      clearInterval(pollInterval);
+      document.removeEventListener('visibilitychange', reschedule);
+      clearInterval(intervalId);
       clearInvestigation();
     };
   }, [loadInvestigation, clearInvestigation]);
@@ -317,7 +343,9 @@ const UnifiedInvestigation = () => {
 
           {/* Panel Content */}
           <div className="flex-1 overflow-hidden" role="tabpanel" id={`panel-${rightPanel}`}>
-            {rightPanel === 'feed' && <LiveFeed investigationId={id} />}
+            {rightPanel === 'feed' && (
+              <LiveFeed investigationId={id} onInvestigationDataMayHaveChanged={refreshFromStream} />
+            )}
             {rightPanel === 'entities' && (
               <div className="h-full overflow-y-auto">
                 <EntitiesWorkspace 

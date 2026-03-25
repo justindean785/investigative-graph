@@ -27,13 +27,24 @@ const EVENT_COLORS = {
   error: '#ef4444',
 };
 
-const LiveFeed = ({ investigationId }) => {
+const STREAM_INVALIDATE_TYPES = new Set([
+  'entity_discovered',
+  'enrichment_completed',
+  'relationship_created',
+  'evidence_added',
+  'progress',
+  'investigation_completed',
+  'error',
+]);
+
+const LiveFeed = ({ investigationId, onInvestigationDataMayHaveChanged }) => {
   const [events, setEvents] = useState([]);
   const [isConnected, setIsConnected] = useState(false);
   const eventSourceRef = useRef(null);
   const feedEndRef = useRef(null);
 
   const retryTimeoutRef = useRef(null);
+  const retryDelayMsRef = useRef(3000);
 
   const addEvent = useCallback((eventType, message, data = {}) => {
     const newEvent = {
@@ -46,6 +57,16 @@ const LiveFeed = ({ investigationId }) => {
     setEvents(prev => [newEvent, ...prev]);
   }, []);
 
+  const maybeNotifyDataChanged = useCallback(
+    (eventType) => {
+      if (!onInvestigationDataMayHaveChanged) return;
+      if (STREAM_INVALIDATE_TYPES.has(eventType)) {
+        onInvestigationDataMayHaveChanged();
+      }
+    },
+    [onInvestigationDataMayHaveChanged]
+  );
+
   const connectToStream = useCallback(() => {
     if (eventSourceRef.current) {
       eventSourceRef.current.close();
@@ -57,16 +78,19 @@ const LiveFeed = ({ investigationId }) => {
 
     eventSource.onopen = () => {
       setIsConnected(true);
+      retryDelayMsRef.current = 3000;
     };
 
     eventSource.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
+        const eventType = data.event_type || 'update';
         addEvent(
-          data.event_type || 'update',
+          eventType,
           data.message || 'Investigation update',
           data.data || {}
         );
+        maybeNotifyDataChanged(eventType);
       } catch (error) {
         console.error('Failed to parse SSE event:', error);
       }
@@ -81,11 +105,13 @@ const LiveFeed = ({ investigationId }) => {
     eventSource.addEventListener('progress', (event) => {
       const data = JSON.parse(event.data);
       addEvent('progress', `Processed: ${data.processed_count}, Discovered: ${data.entities_discovered}`, data);
+      maybeNotifyDataChanged('progress');
     });
 
     eventSource.addEventListener('completed', (event) => {
       const data = JSON.parse(event.data);
       addEvent('investigation_completed', 'Investigation completed', data);
+      maybeNotifyDataChanged('investigation_completed');
       setIsConnected(false);
       eventSource.close();
     });
@@ -94,11 +120,13 @@ const LiveFeed = ({ investigationId }) => {
       console.error('SSE error:', error);
       setIsConnected(false);
       eventSource.close();
-      retryTimeoutRef.current = setTimeout(connectToStream, 3000);
+      const delay = retryDelayMsRef.current;
+      retryDelayMsRef.current = Math.min(Math.round(delay * 1.5), 30000);
+      retryTimeoutRef.current = setTimeout(connectToStream, delay);
     };
 
     eventSourceRef.current = eventSource;
-  }, [investigationId, addEvent]);
+  }, [investigationId, addEvent, maybeNotifyDataChanged]);
 
   useEffect(() => {
     connectToStream();

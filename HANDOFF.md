@@ -646,16 +646,16 @@ Two jobs run on push to `main`/`copilot/**` and PRs to `main`:
 ### Medium Priority
 5. **Gemini model names rotate.** Google deprecates model IDs. Names are configurable via env but require manual updates. `GEMINI_MODEL_FLASH`, `GEMINI_MODEL_PRO`, `GEMINI_MODEL_CHAT`.
 6. **Entity extraction uses regex only.** No NLP/NER. Phone, email, IP, wallet patterns are caught; freeform names, addresses, and context-dependent entities are missed.
-7. **Frontend polling every 3 seconds.** `UnifiedInvestigation` polls all data via 4 API calls every 3s. This is wasteful for idle investigations. Should be reduced or switched to SSE-driven invalidation.
-8. **`test_autonomous_engine.py` at repo root** is a placeholder script with no collected tests. Either implement or remove.
-9. **`test_swatted.py` at repo root** is a manual test script, not integrated with pytest.
+7. **Background polling load.** `UnifiedInvestigation` still polls four endpoints on an interval (now 8s when the tab is visible, 30s when hidden), with throttled refresh on SSE events when the Feed panel is open. Further reduction possible with full SSE-driven invalidation.
+8. **`scripts/dev/test_autonomous_engine.py`** is a manual engine smoke script (not pytest). Run when backend + Mongo are up.
+9. **`scripts/dev/test_swatted.py`** is a manual OSINT smoke script (not pytest).
 
 ### Low Priority
 10. **Frontend/backend field name mismatch.** The store maps API fields (e.g. `entity_type` -> `kind`, `source_entity_id` -> `fromId`) in `loadInvestigation()`. This creates a translation layer that's easy to get wrong.
 11. **No pagination.** Entity/evidence lists use `.to_list(N)` with hardcoded limits. Large investigations could hit memory limits.
 12. **No WebSocket fallback.** SSE works with HTTP/2 but some proxies buffer or drop SSE connections.
-13. **`dy` file in repo root** is a junk API response dump. Should be deleted and added to `.gitignore`.
-14. **`.cursor/` directory** should be added to `.gitignore`.
+13. ~~**`dy` file**~~ — removed; `/dy` is in `.gitignore`.
+14. ~~**`.cursor/`**~~ — listed in `.gitignore`.
 
 ---
 
@@ -663,14 +663,14 @@ Two jobs run on push to `main`/`copilot/**` and PRs to `main`:
 
 ### Immediate (before next feature work)
 1. **Split `server.py`** into route modules under `backend/routers/`. The file is too large to safely edit. Group by domain: investigations, entities, relationships, evidence, osint, ai, leads, graph, export, ingest.
-2. **Add `.cursor/` and `dy` to `.gitignore`**, delete `dy`.
-3. **Clean up root-level test scripts** (`test_autonomous_engine.py`, `test_swatted.py`) -- either integrate into pytest suite or remove.
+2. ~~**Add `.cursor/` and `dy` to `.gitignore`**, delete `dy`.~~ Done.
+3. ~~**Clean up root-level test scripts**~~ — moved to `scripts/dev/` (see `scripts/dev/README.txt`).
 
 ### Short-term (next sprint)
 4. **Persist investigation state to MongoDB** so autonomous investigations survive server restarts.
 5. **Add pause/resume API endpoints** that actually work with the engine (currently the engine supports pause/resume but the routes only modify in-memory state).
-6. **Reduce frontend polling** -- use SSE events to trigger data refresh instead of blind 3-second polling.
-7. **Add error handling for SSE reconnection** in `LiveFeed.js` (currently retries after 3s but doesn't recover missed events).
+6. ~~**Reduce frontend polling**~~ — addressed: visibility-aware intervals + SSE-triggered refresh (Feed tab).
+7. **SSE gaps while disconnected** — reconnect uses exponential backoff; still no catch-up for events missed during outage.
 
 ### Medium-term
 8. **Add user authentication** (JWT or session-based) if multi-user or production deployment is planned.

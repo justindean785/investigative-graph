@@ -229,6 +229,7 @@ const EntitiesWorkspace = ({ investigationId, onNavigateToGraph, onNavigateToEvi
           <div className="flex flex-col sm:flex-row gap-3 justify-center">
             <Button 
               onClick={onNavigateToEvidence}
+              data-testid="entities-empty-start-evidence-button"
               variant="outline"
               className="border-white/10 text-slate-300 hover:bg-white/5"
             >
@@ -285,6 +286,7 @@ const EntitiesWorkspace = ({ investigationId, onNavigateToGraph, onNavigateToEvi
           {relationships.length > 0 && (
             <Button
               onClick={onNavigateToGraph}
+              data-testid="entities-view-graph-button"
               variant="outline"
               className="border-primary/30 text-primary hover:bg-primary/10 text-xs h-8"
             >
@@ -296,6 +298,7 @@ const EntitiesWorkspace = ({ investigationId, onNavigateToGraph, onNavigateToEvi
           <Dialog open={showLinkDialog} onOpenChange={setShowLinkDialog}>
             <DialogTrigger asChild>
               <Button 
+                data-testid="entities-link-button"
                 variant="outline"
                 className="border-white/10 text-slate-300 hover:bg-white/5 text-xs h-8"
                 disabled={entities.length < 2}
@@ -312,7 +315,7 @@ const EntitiesWorkspace = ({ investigationId, onNavigateToGraph, onNavigateToEvi
                 <div>
                   <Label className="text-xs font-semibold text-cyan-500/80 uppercase tracking-wider">Source Entity</Label>
                   <Select value={newLink.source_entity_id} onValueChange={(value) => setNewLink({ ...newLink, source_entity_id: value })}>
-                    <SelectTrigger className="mt-2 bg-black/50 border-white/10 text-white">
+                    <SelectTrigger data-testid="entities-link-source-select" className="mt-2 bg-black/50 border-white/10 text-white">
                       <SelectValue placeholder="Select entity" />
                     </SelectTrigger>
                     <SelectContent className="bg-[#0a0a0a] border-white/10 text-white">
@@ -342,7 +345,7 @@ const EntitiesWorkspace = ({ investigationId, onNavigateToGraph, onNavigateToEvi
                 <div>
                   <Label className="text-xs font-semibold text-cyan-500/80 uppercase tracking-wider">Relationship</Label>
                   <Select value={newLink.relationship_type} onValueChange={(value) => setNewLink({ ...newLink, relationship_type: value })}>
-                    <SelectTrigger className="mt-2 bg-black/50 border-white/10 text-white">
+                    <SelectTrigger data-testid="entities-link-type-select" className="mt-2 bg-black/50 border-white/10 text-white">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent className="bg-[#0a0a0a] border-white/10 text-white">
@@ -366,7 +369,7 @@ const EntitiesWorkspace = ({ investigationId, onNavigateToGraph, onNavigateToEvi
                 <div>
                   <Label className="text-xs font-semibold text-cyan-500/80 uppercase tracking-wider">Target Entity</Label>
                   <Select value={newLink.target_entity_id} onValueChange={(value) => setNewLink({ ...newLink, target_entity_id: value })}>
-                    <SelectTrigger className="mt-2 bg-black/50 border-white/10 text-white">
+                    <SelectTrigger data-testid="entities-link-target-select" className="mt-2 bg-black/50 border-white/10 text-white">
                       <SelectValue placeholder="Select entity" />
                     </SelectTrigger>
                     <SelectContent className="bg-[#0a0a0a] border-white/10 text-white">
@@ -386,6 +389,7 @@ const EntitiesWorkspace = ({ investigationId, onNavigateToGraph, onNavigateToEvi
                 </div>
 
                 <Button
+                  data-testid="entities-create-connection-button"
                   onClick={handleCreateLink}
                   className="w-full bg-primary hover:bg-primary/90 text-white rounded-sm"
                 >
@@ -425,6 +429,7 @@ const EntitiesWorkspace = ({ investigationId, onNavigateToGraph, onNavigateToEvi
         <div className="relative">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
           <Input
+            data-testid="entities-search-input"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             className="pl-9 bg-black/30 border-white/10 h-9 text-sm"
@@ -482,6 +487,7 @@ const EntitiesWorkspace = ({ investigationId, onNavigateToGraph, onNavigateToEvi
                       <Button
                         variant="ghost"
                         size="sm"
+                        data-testid={`entity-edit-button-${entity.id}`}
                         onClick={(e) => handleOpenEditDialog(entity, e)}
                         className="h-7 w-7 p-0 text-slate-500 hover:text-cyan-400"
                         title="Edit entity"
@@ -491,6 +497,7 @@ const EntitiesWorkspace = ({ investigationId, onNavigateToGraph, onNavigateToEvi
                       <Button
                         variant="ghost"
                         size="sm"
+                        data-testid={`entity-delete-button-${entity.id}`}
                         onClick={(e) => handleDeleteEntity(entity.id, e)}
                         className="h-7 w-7 p-0 text-slate-500 hover:text-red-400 opacity-0 group-hover:opacity-100"
                       >
@@ -543,6 +550,7 @@ const EntitiesWorkspace = ({ investigationId, onNavigateToGraph, onNavigateToEvi
             <div>
               <Label className="text-xs font-semibold text-cyan-500/80 uppercase tracking-wider">Value</Label>
               <Input
+                data-testid="entity-edit-value-input"
                 value={editEntity.value}
                 onChange={(e) => setEditEntity({ ...editEntity, value: e.target.value })}
                 className="mt-2 bg-black/50 border-white/10 text-white"
@@ -552,6 +560,7 @@ const EntitiesWorkspace = ({ investigationId, onNavigateToGraph, onNavigateToEvi
             <div>
               <Label className="text-xs font-semibold text-cyan-500/80 uppercase tracking-wider">Label (Optional)</Label>
               <Input
+                data-testid="entity-edit-label-input"
                 value={editEntity.label}
                 onChange={(e) => setEditEntity({ ...editEntity, label: e.target.value })}
                 className="mt-2 bg-black/50 border-white/10 text-white"
@@ -562,6 +571,7 @@ const EntitiesWorkspace = ({ investigationId, onNavigateToGraph, onNavigateToEvi
               <Label className="text-xs font-semibold text-cyan-500/80 uppercase tracking-wider">Confidence</Label>
               <div className="flex items-center gap-3 mt-2">
                 <input
+                  data-testid="entity-edit-confidence-input"
                   type="range"
                   min={0}
                   max={1}
@@ -578,13 +588,14 @@ const EntitiesWorkspace = ({ investigationId, onNavigateToGraph, onNavigateToEvi
             <div>
               <Label className="text-xs font-semibold text-cyan-500/80 uppercase tracking-wider">Notes</Label>
               <textarea
+                data-testid="entity-edit-notes-input"
                 value={editEntity.notes}
                 onChange={(e) => setEditEntity({ ...editEntity, notes: e.target.value })}
                 className="mt-2 w-full bg-black/50 border border-white/10 text-white rounded-sm px-3 py-2 min-h-[60px] text-sm"
                 placeholder="Additional notes"
               />
             </div>
-            <Button onClick={handleSaveEdit} className="w-full bg-emerald-500 hover:bg-emerald-600 text-white rounded-sm">
+            <Button data-testid="entity-save-edit-button" onClick={handleSaveEdit} className="w-full bg-emerald-500 hover:bg-emerald-600 text-white rounded-sm">
               Save Changes
             </Button>
           </div>
@@ -602,7 +613,7 @@ const EntityForm = ({ newEntity, setNewEntity, onSubmit }) => (
     <div>
       <Label className="text-xs font-semibold text-cyan-500/80 uppercase tracking-wider">Entity Type</Label>
       <Select value={newEntity.entity_type} onValueChange={(value) => setNewEntity({ ...newEntity, entity_type: value })}>
-        <SelectTrigger className="mt-2 bg-black/50 border-white/10 text-white">
+        <SelectTrigger data-testid="entity-form-type-select" className="mt-2 bg-black/50 border-white/10 text-white">
           <SelectValue />
         </SelectTrigger>
         <SelectContent className="bg-[#0a0a0a] border-white/10 text-white">
@@ -621,6 +632,7 @@ const EntityForm = ({ newEntity, setNewEntity, onSubmit }) => (
     <div>
       <Label className="text-xs font-semibold text-cyan-500/80 uppercase tracking-wider">Value</Label>
       <Input
+        data-testid="entity-form-value-input"
         value={newEntity.value}
         onChange={(e) => setNewEntity({ ...newEntity, value: e.target.value })}
         className="mt-2 bg-black/50 border-white/10 text-white"
@@ -631,6 +643,7 @@ const EntityForm = ({ newEntity, setNewEntity, onSubmit }) => (
     <div>
       <Label className="text-xs font-semibold text-cyan-500/80 uppercase tracking-wider">Label (Optional)</Label>
       <Input
+        data-testid="entity-form-label-input"
         value={newEntity.label}
         onChange={(e) => setNewEntity({ ...newEntity, label: e.target.value })}
         className="mt-2 bg-black/50 border-white/10 text-white"
@@ -641,6 +654,7 @@ const EntityForm = ({ newEntity, setNewEntity, onSubmit }) => (
     <div>
       <Label className="text-xs font-semibold text-cyan-500/80 uppercase tracking-wider">Notes</Label>
       <textarea
+        data-testid="entity-form-notes-input"
         value={newEntity.notes}
         onChange={(e) => setNewEntity({ ...newEntity, notes: e.target.value })}
         className="mt-2 w-full bg-black/50 border border-white/10 text-white rounded-sm px-3 py-2 min-h-[60px] text-sm"
@@ -649,6 +663,7 @@ const EntityForm = ({ newEntity, setNewEntity, onSubmit }) => (
     </div>
 
     <Button
+      data-testid="entity-form-submit-button"
       onClick={onSubmit}
       className="w-full bg-emerald-500 hover:bg-emerald-600 text-white rounded-sm"
     >

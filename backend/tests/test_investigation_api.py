@@ -43,15 +43,13 @@ class TestHealthAndAuth:
         print("Valid API key accepted")
     
     def test_auth_with_invalid_key(self):
-        """Test authentication with invalid API key"""
+        """Invalid API key is rejected with 401 (same as other protected routes)."""
         response = requests.post(
             f"{BASE_URL}/api/auth/validate",
             headers={"x-api-key": "invalid-key"}
         )
-        assert response.status_code == 200
-        data = response.json()
-        assert data["valid"] == False
-        print("Invalid API key rejected correctly")
+        assert response.status_code == 401
+        assert response.json().get("detail") == "Invalid API key"
 
 class TestInvestigations:
     """Test Investigation CRUD operations"""

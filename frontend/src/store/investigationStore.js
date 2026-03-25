@@ -1,4 +1,9 @@
 import { create } from 'zustand';
+import axios, { API } from '../config/api';
+
+const api = {
+  post: (path, payload) => axios.post(`${API}${path}`, payload),
+};
 
 // Helper to create timeline events, reducing repetition across store actions
 function createTimelineEvent(type, summary, refs = {}, meta = {}) {
@@ -15,10 +20,13 @@ function createTimelineEvent(type, summary, refs = {}, meta = {}) {
 const useInvestigationStore = create((set, get) => ({
   // Investigation metadata
   investigation: null,
+  currentInvestigationId: null,
   
   // Core data
   entities: [],
   relationships: [],
+  nodes: [],
+  edges: [],
   evidence: [],
   timeline: [],
   aiSuggestions: [],
@@ -39,9 +47,12 @@ const useInvestigationStore = create((set, get) => ({
   },
   
   // Actions
-  setInvestigation: (investigation) => set({ investigation }),
+  setInvestigation: (investigation) => set({
+    investigation,
+    currentInvestigationId: investigation?.id || null,
+  }),
   
-  setEntities: (entities) => set({ entities }),
+  setEntities: (entities) => set({ entities, nodes: entities }),
   
   addEntity: (entity) => set((state) => {
     const timelineEvent = createTimelineEvent(
@@ -52,12 +63,14 @@ const useInvestigationStore = create((set, get) => ({
     );
     return {
       entities: [...state.entities, entity],
+      nodes: [...state.nodes, entity],
       timeline: [timelineEvent, ...state.timeline],
     };
   }),
   
   updateEntity: (id, updates) => set((state) => ({
     entities: state.entities.map(e => e.id === id ? { ...e, ...updates } : e),
+    nodes: state.nodes.map(e => e.id === id ? { ...e, ...updates } : e),
   })),
   
   removeEntity: (id) => set((state) => {
@@ -69,12 +82,14 @@ const useInvestigationStore = create((set, get) => ({
     );
     return {
       entities: state.entities.filter(e => e.id !== id),
+      nodes: state.nodes.filter(e => e.id !== id),
       relationships: state.relationships.filter(r => r.fromId !== id && r.toId !== id),
+      edges: state.edges.filter(r => r.fromId !== id && r.toId !== id),
       timeline: [timelineEvent, ...state.timeline],
     };
   }),
   
-  setRelationships: (relationships) => set({ relationships }),
+  setRelationships: (relationships) => set({ relationships, edges: relationships }),
   
   addRelationship: (relationship) => set((state) => {
     const fromEntity = state.entities.find(e => e.id === relationship.fromId);
@@ -87,6 +102,7 @@ const useInvestigationStore = create((set, get) => ({
     );
     return {
       relationships: [...state.relationships, relationship],
+      edges: [...state.edges, relationship],
       timeline: [timelineEvent, ...state.timeline],
     };
   }),
@@ -99,6 +115,7 @@ const useInvestigationStore = create((set, get) => ({
     );
     return {
       relationships: state.relationships.filter(r => r.id !== id),
+      edges: state.edges.filter(r => r.id !== id),
       timeline: [timelineEvent, ...state.timeline],
     };
   }),
@@ -150,46 +167,27 @@ const useInvestigationStore = create((set, get) => ({
     aiSuggestions: [...state.aiSuggestions, suggestion],
   })),
   
-  acceptAISuggestion: (suggestionId) => set((state) => {
-    const suggestion = state.aiSuggestions.find(s => s.id === suggestionId);
-    if (!suggestion) return state;
-    
-    let newState = { ...state };
-    const timelineEvent = createTimelineEvent(
-      'AI_SUGGESTION_ACCEPTED',
-      `Accepted AI suggestion: ${suggestion.title}`,
-      {},
-      { suggestionId, type: suggestion.type },
-    );
-    
-    // Execute actions
-    suggestion.actions?.forEach(action => {
-      if (action.kind === 'ADD_ENTITY') {
-        const newEntity = {
-          id: `ent-${Date.now()}-${Math.random()}`,
-          ...action.payload,
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        };
-        newState.entities = [...newState.entities, newEntity];
-      } else if (action.kind === 'ADD_EDGE') {
-        const newEdge = {
-          id: `edge-${Date.now()}-${Math.random()}`,
-          ...action.payload,
-          createdAt: new Date().toISOString(),
-        };
-        newState.relationships = [...newState.relationships, newEdge];
-      }
-    });
-    
-    return {
-      ...newState,
-      aiSuggestions: state.aiSuggestions.map(s => 
-        s.id === suggestionId ? { ...s, status: 'accepted' } : s
-      ),
-      timeline: [timelineEvent, ...newState.timeline],
-    };
-  }),
+  acceptAISuggestion: async (suggestionId) => {
+    const suggestion = get().aiSuggestions.find(s => s.id === suggestionId);
+    if (!suggestion) return;
+
+    try {
+      await api.post(`/investigations/${get().currentInvestigationId}/suggestions/${suggestionId}/accept`);
+    } catch (e) {
+      console.warn('Backend persist failed, still applying locally', e);
+    }
+
+    const suggestionNodes = suggestion.nodes || suggestion.entities || [];
+    const suggestionEdges = suggestion.edges || suggestion.relationships || [];
+
+    set((state) => ({
+      nodes: [...state.nodes, ...suggestionNodes],
+      edges: [...state.edges, ...suggestionEdges],
+      entities: [...state.entities, ...suggestionNodes],
+      relationships: [...state.relationships, ...suggestionEdges],
+      aiSuggestions: state.aiSuggestions.filter(s => s.id !== suggestionId),
+    }));
+  },
   
   dismissAISuggestion: (suggestionId) => set((state) => ({
     aiSuggestions: state.aiSuggestions.map(s => 
@@ -230,8 +228,11 @@ const useInvestigationStore = create((set, get) => ({
   // Clear all data
   clearInvestigation: () => set({
     investigation: null,
+    currentInvestigationId: null,
     entities: [],
     relationships: [],
+    nodes: [],
+    edges: [],
     evidence: [],
     timeline: [],
     aiSuggestions: [],

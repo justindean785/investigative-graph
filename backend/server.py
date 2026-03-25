@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo.errors import ServerSelectionTimeoutError, ConnectionFailure
 from contextlib import asynccontextmanager
 import os
 import logging
@@ -13,12 +14,14 @@ from typing import List, Optional, Dict, Any
 import uuid
 from datetime import datetime, timezone
 from google import genai
+from openai import AsyncOpenAI
 import json
 import re
 import collections
 import hmac
 import ipaddress
 import httpx
+import socket
 from io import BytesIO
 from urllib.parse import urlparse
 
@@ -45,10 +48,20 @@ except ImportError:
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-# MongoDB connection
-mongo_url = os.environ['MONGO_URL']
+# MongoDB connection (fail fast with a clear message if .env is missing keys)
+mongo_url = os.environ.get("MONGO_URL", "").strip()
+if not mongo_url:
+    raise RuntimeError(
+        "MONGO_URL is not set. Copy backend/.env.example to backend/.env and set MONGO_URL "
+        "(e.g. mongodb://127.0.0.1:27017 for local Mongo or your Atlas connection string)."
+    )
+_db_name = os.environ.get("DB_NAME", "").strip()
+if not _db_name:
+    raise RuntimeError(
+        "DB_NAME is not set. Set DB_NAME in backend/.env (e.g. trace_analyst)."
+    )
 client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+db = client[_db_name]
 
 API_KEY = os.environ.get('API_KEY', 'trace-analyst-secret-2026')
 
@@ -60,6 +73,10 @@ GEMINI_MODEL_FLASH = os.environ.get("GEMINI_MODEL_FLASH", "gemini-2.0-flash")
 GEMINI_MODEL_PRO = os.environ.get("GEMINI_MODEL_PRO", "gemini-1.5-pro")
 GEMINI_MODEL_CHAT = os.environ.get("GEMINI_MODEL_CHAT", GEMINI_MODEL_FLASH)
 _gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+_grok_client = AsyncOpenAI(
+    api_key=os.getenv("GROK_API_KEY"),
+    base_url="https://api.x.ai/v1",
+) if os.getenv("GROK_API_KEY") else None
 
 # GHOSINT — live OSINT search
 GHOSINT_API_KEY = os.environ.get('GHOSINT_API_KEY')
@@ -466,6 +483,13 @@ class ChatRequest(BaseModel):
     session_id: Optional[str] = None
 
 
+class GrokEnrichRequest(BaseModel):
+    entity_type: str
+    value: str
+    investigation_id: str
+    context: Optional[str] = None
+
+
 class EntityMergeRequest(BaseModel):
     """Request to merge two entity records into one, keeping the primary entity."""
     primary_entity_id: str   # Entity to keep
@@ -726,30 +750,25 @@ ENTITY_PATTERNS = {
 # ============= CONTENT EXTRACTION FUNCTIONS =============
 
 
-def validate_url_for_ssrf(url: str) -> None:
-    """Reject URLs targeting private/internal networks to prevent SSRF."""
-    parsed = urlparse(url)
-    if parsed.scheme not in ("http", "https"):
-        raise ValueError(f"Unsupported URL scheme: {parsed.scheme}")
-    hostname = parsed.hostname
-    if not hostname:
-        raise ValueError("Missing hostname in URL")
-    blocked_hosts = {"localhost", "127.0.0.1", "::1", "0.0.0.0", "[::1]"}
-    if hostname.lower() in blocked_hosts or hostname.lower().endswith(".local") or hostname.lower().endswith(".internal"):
-        raise ValueError("URLs targeting localhost or internal hosts are not allowed")
+def is_safe_url(url: str) -> bool:
+    """Block SSRF / internal network access"""
     try:
-        addr = ipaddress.ip_address(hostname)
-        if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved:
-            raise ValueError("URLs targeting private or reserved IP addresses are not allowed")
-    except ValueError as ip_err:
-        if "not allowed" in str(ip_err):
-            raise
-        # hostname is a DNS name, not an IP literal — that's fine
-        pass
+        parsed = urlparse(url)
+        if not parsed.hostname:
+            return False
+        host = parsed.hostname.lower()
+        if any(x in host for x in ["localhost", "127.0.0.1", "0.0.0.0", "internal", "10."]):
+            return False
+        ip = ipaddress.ip_address(socket.gethostbyname(host))
+        return not (ip.is_private or ip.is_loopback or ip.is_link_local)
+    except Exception:
+        return False
 
 
 async def fetch_url_content(url: str) -> Dict[str, Any]:
     """Fetch and parse content from a URL"""
+    if not is_safe_url(url):
+        raise HTTPException(400, "URL not allowed")
     result = {
         "success": False,
         "content": "",
@@ -759,7 +778,6 @@ async def fetch_url_content(url: str) -> Dict[str, Any]:
     }
 
     try:
-        validate_url_for_ssrf(url)
         async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
             response = await client.get(url, headers={
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
@@ -3046,6 +3064,45 @@ async def chat_with_ai(
         raise HTTPException(status_code=500, detail="AI chat failed. Please try again later.")
 
 
+@api_router.post("/ai/grok/enrich")
+async def grok_enrich_entity(
+    request: GrokEnrichRequest,
+    x_api_key: Optional[str] = Header(None)
+):
+    await validate_api_key(x_api_key)
+    if not _grok_client:
+        raise HTTPException(503, "GROK_API_KEY not configured")
+
+    prompt = f"""Elite OSINT analyst mode. Enrich this entity and return ONLY valid JSON:
+{{
+  "enriched_metadata": {{...}},
+  "relationships": [{{ "type": "...", "target": "...", "confidence": 0.9 }}],
+  "risk_score": 0.65,
+  "leads": ["step 1", "step 2"],
+  "summary": "one-line intel"
+}}
+
+Entity: {request.entity_type} → {request.value}
+Context: {request.context or 'None'}"""
+
+    response = await _grok_client.chat.completions.create(
+        model="grok-3",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.3,
+        max_tokens=1200
+    )
+    result = json.loads(response.choices[0].message.content)
+
+    await db.entities.update_one(
+        {"investigation_id": request.investigation_id, "value": request.value},
+        {"$set": {"metadata": result.get("enriched_metadata", {}), "risk_score": result.get("risk_score", 0.0)}}
+    )
+
+    await create_timeline_event(request.investigation_id, "ai_enrichment", f"Grok-3 enriched {request.entity_type}: {request.value}")
+
+    return {"success": True, "data": result}
+
+
 @api_router.delete("/investigations/{investigation_id}/chat/clear")
 async def clear_chat_history(
     investigation_id: str,
@@ -3765,7 +3822,17 @@ async def create_mongodb_indexes():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global investigation_engine
-    await create_mongodb_indexes()
+    try:
+        await create_mongodb_indexes()
+    except (ServerSelectionTimeoutError, ConnectionFailure) as e:
+        logger.error(
+            "MongoDB is not reachable. Start Mongo (see LOCAL_DEV.md: Docker, Atlas, or local "
+            "service) and verify MONGO_URL in backend/.env. Details: %s",
+            e,
+        )
+        raise RuntimeError(
+            "MongoDB connection failed during startup; fix MongoDB/MONGO_URL and restart the backend."
+        ) from e
 
     # Initialize investigation engine with db and OSINT search function
     investigation_engine = InvestigationEngine(db, _osint_search_for_engine)
@@ -3799,19 +3866,14 @@ async def _osint_search_for_engine(query: str, search_type: str) -> dict:
 
 # Main app (lifespan handles index creation and Motor client shutdown)
 app = FastAPI(lifespan=lifespan)
-app.include_router(api_router)
-
-_raw_cors = os.environ.get("CORS_ORIGINS", "*").strip()
-_cors_origins = [o.strip() for o in _raw_cors.split(",") if o.strip()] or ["*"]
-# Browsers reject Access-Control-Allow-Origin: * together with credentialed requests; disable credentials for wildcard.
-_cors_allow_credentials = "*" not in _cors_origins
 
 app.add_middleware(
     CORSMiddleware,
-    allow_credentials=_cors_allow_credentials,
-    allow_origins=_cors_origins,
-    allow_methods=["*"],
+    allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:3000").split(","),
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
 app.add_middleware(GZipMiddleware, minimum_size=1000)
+app.include_router(api_router)

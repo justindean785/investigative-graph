@@ -250,6 +250,7 @@ const GraphView = ({ investigationId, onNavigateToEvidence, onNavigateToEntities
           <div className="flex flex-col sm:flex-row gap-3 justify-center">
             <Button 
               onClick={onNavigateToEvidence}
+              data-testid="graph-empty-add-evidence-button"
               className="bg-primary hover:bg-primary/90 text-white"
             >
               <FileBox className="w-4 h-4 mr-2" />
@@ -258,6 +259,7 @@ const GraphView = ({ investigationId, onNavigateToEvidence, onNavigateToEntities
             
             <Button 
               onClick={onNavigateToEntities}
+              data-testid="graph-empty-add-entities-button"
               variant="outline"
               className="border-white/10 text-slate-300 hover:bg-white/5"
             >
@@ -308,6 +310,7 @@ const GraphView = ({ investigationId, onNavigateToEvidence, onNavigateToEntities
                 </span>
                 <Button
                   onClick={onNavigateToEntities}
+                  data-testid="graph-link-entities-button"
                   size="sm"
                   className="bg-amber-500 hover:bg-amber-600 text-black text-xs h-7"
                 >
@@ -391,6 +394,7 @@ const GraphView = ({ investigationId, onNavigateToEvidence, onNavigateToEntities
                 <div>
                   <Label className="text-xs font-semibold text-cyan-500/80 uppercase tracking-wider">Label (Optional)</Label>
                   <Input
+                    data-testid="entity-label-input"
                     value={newEntity.label}
                     onChange={(e) => setNewEntity({ ...newEntity, label: e.target.value })}
                     className="mt-2 bg-black/50 border-white/10 text-white"
@@ -428,7 +432,7 @@ const GraphView = ({ investigationId, onNavigateToEvidence, onNavigateToEntities
                 <div>
                   <Label className="text-xs font-semibold text-cyan-500/80 uppercase tracking-wider">Source Entity</Label>
                   <Select value={newRelationship.source_entity_id} onValueChange={(value) => setNewRelationship({ ...newRelationship, source_entity_id: value })}>
-                    <SelectTrigger className="mt-2 bg-black/50 border-white/10 text-white">
+                    <SelectTrigger data-testid="relationship-source-select" className="mt-2 bg-black/50 border-white/10 text-white">
                       <SelectValue placeholder="Select source" />
                     </SelectTrigger>
                     <SelectContent className="bg-[#0a0a0a] border-white/10 text-white">
@@ -444,7 +448,7 @@ const GraphView = ({ investigationId, onNavigateToEvidence, onNavigateToEntities
                 <div>
                   <Label className="text-xs font-semibold text-cyan-500/80 uppercase tracking-wider">Relationship Type</Label>
                   <Select value={newRelationship.relationship_type} onValueChange={(value) => setNewRelationship({ ...newRelationship, relationship_type: value })}>
-                    <SelectTrigger className="mt-2 bg-black/50 border-white/10 text-white">
+                    <SelectTrigger data-testid="relationship-type-select" className="mt-2 bg-black/50 border-white/10 text-white">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent className="bg-[#0a0a0a] border-white/10 text-white">
@@ -460,7 +464,7 @@ const GraphView = ({ investigationId, onNavigateToEvidence, onNavigateToEntities
                 <div>
                   <Label className="text-xs font-semibold text-cyan-500/80 uppercase tracking-wider">Target Entity</Label>
                   <Select value={newRelationship.target_entity_id} onValueChange={(value) => setNewRelationship({ ...newRelationship, target_entity_id: value })}>
-                    <SelectTrigger className="mt-2 bg-black/50 border-white/10 text-white">
+                    <SelectTrigger data-testid="relationship-target-select" className="mt-2 bg-black/50 border-white/10 text-white">
                       <SelectValue placeholder="Select target" />
                     </SelectTrigger>
                     <SelectContent className="bg-[#0a0a0a] border-white/10 text-white">
@@ -494,6 +498,7 @@ const GraphView = ({ investigationId, onNavigateToEvidence, onNavigateToEntities
             <Button
               variant="ghost"
               size="sm"
+              data-testid="graph-close-entity-details-button"
               onClick={() => {
                 setSelectedNode(null);
                 selectEntity(null);
@@ -557,6 +562,7 @@ const GraphView = ({ investigationId, onNavigateToEvidence, onNavigateToEntities
 
             <div className="pt-4 border-t border-white/10">
               <Button
+                data-testid="graph-delete-entity-button"
                 onClick={() => handleDeleteEntity(selectedNode.id)}
                 className="w-full bg-red-500/10 text-red-400 hover:bg-red-500/20 border border-red-500/20 rounded-sm text-xs"
               >

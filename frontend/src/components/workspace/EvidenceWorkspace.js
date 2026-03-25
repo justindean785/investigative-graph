@@ -620,6 +620,7 @@ const EvidenceWorkspace = ({ investigationId, onNavigateToEntities }) => {
             <Button
               variant="outline"
               onClick={onNavigateToEntities}
+              data-testid="evidence-view-entities-button"
               className="border-white/10 text-slate-300 hover:bg-white/5 text-xs h-8"
             >
               <Sparkles className="w-3.5 h-3.5 mr-1.5" />
@@ -630,6 +631,7 @@ const EvidenceWorkspace = ({ investigationId, onNavigateToEntities }) => {
           {/* Quick Actions */}
           <Button
             onClick={() => { setQuickMode('url'); setShowQuickIngest(true); }}
+            data-testid="evidence-quick-url-button"
             variant="outline"
             size="sm"
             className="border-primary/30 text-primary hover:bg-primary/10 text-xs h-8"
@@ -740,6 +742,7 @@ const EvidenceWorkspace = ({ investigationId, onNavigateToEntities }) => {
                             const nextStatus = { verified: 'disputed', unverified: 'verified', disputed: 'unverified' };
                             return (
                               <button
+                                data-testid={`evidence-status-button-${item.id}`}
                                 onClick={(e) => handleUpdateVerification(item.id, nextStatus[status], e)}
                                 className={`text-[10px] px-2 py-0.5 rounded-sm border ${statusStyles[status]} hover:opacity-80 transition-opacity`}
                                 title="Click to cycle status"
@@ -762,6 +765,7 @@ const EvidenceWorkspace = ({ investigationId, onNavigateToEntities }) => {
                         <Button
                           variant="ghost"
                           size="sm"
+                          data-testid={`evidence-delete-button-${item.id}`}
                           onClick={(e) => handleDeleteEvidence(item.id, e)}
                           className="h-7 w-7 p-0 text-slate-500 hover:text-red-400"
                         >
@@ -801,6 +805,7 @@ const EvidenceWorkspace = ({ investigationId, onNavigateToEntities }) => {
                           Extract entities from this evidence
                         </span>
                         <Button
+                          data-testid={`evidence-detect-indicators-button-${item.id}`}
                           onClick={async () => {
                             // Run extraction on this evidence
                             try {
@@ -850,6 +855,7 @@ const EvidenceWorkspace = ({ investigationId, onNavigateToEntities }) => {
               <Button
                 variant="ghost"
                 size="sm"
+                data-testid="evidence-close-detected-panel-button"
                 onClick={() => {
                   setShowDetectedPanel(false);
                   setDetectedEntities([]);
@@ -892,6 +898,7 @@ const EvidenceWorkspace = ({ investigationId, onNavigateToEntities }) => {
                         </div>
                         <Button
                           size="sm"
+                          data-testid={`detected-entity-add-button-${idx}`}
                           onClick={() => handleAddDetectedEntity(entity)}
                           className="bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 border-0 h-7 px-2"
                         >
@@ -906,6 +913,7 @@ const EvidenceWorkspace = ({ investigationId, onNavigateToEntities }) => {
 
             <div className="p-3 border-t border-white/5">
               <Button
+                data-testid="detected-entity-add-all-button"
                 onClick={handleAddAllDetected}
                 className="w-full bg-amber-500 hover:bg-amber-600 text-black text-xs h-9"
               >
@@ -938,6 +946,7 @@ const EvidenceWorkspace = ({ investigationId, onNavigateToEntities }) => {
               ].map(mode => (
                 <button
                   key={mode.key}
+                  data-testid={`quick-ingest-mode-${mode.key}`}
                   onClick={() => setQuickMode(mode.key)}
                   className={`flex-1 px-3 py-2 text-xs font-medium flex items-center justify-center gap-1.5 transition-colors ${
                     quickMode === mode.key
@@ -956,6 +965,7 @@ const EvidenceWorkspace = ({ investigationId, onNavigateToEntities }) => {
                 <div>
                   <Label className="text-xs font-semibold text-cyan-500/80 uppercase tracking-wider">URL</Label>
                   <Input
+                    data-testid="quick-url-input"
                     value={quickUrl}
                     onChange={(e) => setQuickUrl(e.target.value)}
                     placeholder="https://example.com/page"
@@ -966,6 +976,7 @@ const EvidenceWorkspace = ({ investigationId, onNavigateToEntities }) => {
                   The URL will be fetched and parsed. Entities will be automatically extracted.
                 </p>
                 <Button
+                  data-testid="quick-url-submit-button"
                   onClick={handleQuickUrlIngest}
                   disabled={quickLoading || !quickUrl.trim()}
                   className="w-full bg-primary hover:bg-primary/90 text-white"
@@ -981,6 +992,7 @@ const EvidenceWorkspace = ({ investigationId, onNavigateToEntities }) => {
                 <div>
                   <Label className="text-xs font-semibold text-cyan-500/80 uppercase tracking-wider">Title (Optional)</Label>
                   <Input
+                    data-testid="quick-text-title-input"
                     value={quickTitle}
                     onChange={(e) => setQuickTitle(e.target.value)}
                     placeholder="Evidence title"
@@ -990,6 +1002,7 @@ const EvidenceWorkspace = ({ investigationId, onNavigateToEntities }) => {
                 <div>
                   <Label className="text-xs font-semibold text-cyan-500/80 uppercase tracking-wider">Raw Text</Label>
                   <textarea
+                    data-testid="quick-text-input"
                     value={quickText}
                     onChange={(e) => setQuickText(e.target.value)}
                     placeholder="Paste raw text, logs, chat messages, or any content..."
@@ -997,6 +1010,7 @@ const EvidenceWorkspace = ({ investigationId, onNavigateToEntities }) => {
                   />
                 </div>
                 <Button
+                  data-testid="quick-text-submit-button"
                   onClick={handleQuickTextIngest}
                   disabled={quickLoading || !quickText.trim()}
                   className="w-full bg-primary hover:bg-primary/90 text-white"
@@ -1010,6 +1024,7 @@ const EvidenceWorkspace = ({ investigationId, onNavigateToEntities }) => {
             {quickMode === 'file' && (
               <>
                 <div 
+                  data-testid="quick-file-dropzone"
                   className="border-2 border-dashed border-white/20 rounded-sm p-8 text-center hover:border-primary/50 transition-colors cursor-pointer"
                   onClick={() => document.getElementById('file-upload').click()}
                 >
@@ -1018,6 +1033,7 @@ const EvidenceWorkspace = ({ investigationId, onNavigateToEntities }) => {
                   <p className="text-xs text-slate-500">PDF, Images, Documents (max 10MB)</p>
                   <input
                     id="file-upload"
+                    data-testid="quick-file-input"
                     type="file"
                     className="hidden"
                     onChange={(e) => {
@@ -1057,6 +1073,7 @@ const EvidenceForm = ({ categories, selectedCategory, setSelectedCategory, newEv
           {Object.entries(categories).map(([key, cat]) => (
             <button
               key={key}
+              data-testid={`evidence-category-button-${key}`}
               onClick={() => {
                 setSelectedCategory(key);
                 setNewEvidence({ ...newEvidence, evidence_type: cat.types[0].value });
@@ -1086,7 +1103,7 @@ const EvidenceForm = ({ categories, selectedCategory, setSelectedCategory, newEv
           value={newEvidence.evidence_type} 
           onValueChange={(value) => setNewEvidence({ ...newEvidence, evidence_type: value })}
         >
-          <SelectTrigger className="mt-2 bg-black/50 border-white/10 text-white">
+          <SelectTrigger data-testid="evidence-form-type-select" className="mt-2 bg-black/50 border-white/10 text-white">
             <SelectValue />
           </SelectTrigger>
           <SelectContent className="bg-[#0a0a0a] border-white/10 text-white">
@@ -1102,6 +1119,7 @@ const EvidenceForm = ({ categories, selectedCategory, setSelectedCategory, newEv
       <div>
         <Label className="text-xs font-semibold text-cyan-500/80 uppercase tracking-wider">Title</Label>
         <Input
+          data-testid="evidence-form-title-input"
           value={newEvidence.title}
           onChange={(e) => setNewEvidence({ ...newEvidence, title: e.target.value })}
           className="mt-2 bg-black/50 border-white/10 text-white"
@@ -1112,6 +1130,7 @@ const EvidenceForm = ({ categories, selectedCategory, setSelectedCategory, newEv
       <div>
         <Label className="text-xs font-semibold text-cyan-500/80 uppercase tracking-wider">Source URL</Label>
         <Input
+          data-testid="evidence-form-source-url-input"
           value={newEvidence.source_url}
           onChange={(e) => setNewEvidence({ ...newEvidence, source_url: e.target.value })}
           className="mt-2 bg-black/50 border-white/10 text-white"
@@ -1122,6 +1141,7 @@ const EvidenceForm = ({ categories, selectedCategory, setSelectedCategory, newEv
       <div>
         <Label className="text-xs font-semibold text-cyan-500/80 uppercase tracking-wider">Content</Label>
         <textarea
+          data-testid="evidence-form-content-input"
           value={newEvidence.content}
           onChange={(e) => setNewEvidence({ ...newEvidence, content: e.target.value })}
           className="mt-2 w-full bg-black/50 border border-white/10 text-white rounded-sm px-3 py-2 min-h-[100px] text-sm"
@@ -1132,6 +1152,7 @@ const EvidenceForm = ({ categories, selectedCategory, setSelectedCategory, newEv
       <div>
         <Label className="text-xs font-semibold text-cyan-500/80 uppercase tracking-wider">Notes</Label>
         <Input
+          data-testid="evidence-form-notes-input"
           value={newEvidence.notes}
           onChange={(e) => setNewEvidence({ ...newEvidence, notes: e.target.value })}
           className="mt-2 bg-black/50 border-white/10 text-white"
@@ -1140,6 +1161,7 @@ const EvidenceForm = ({ categories, selectedCategory, setSelectedCategory, newEv
       </div>
 
       <Button
+        data-testid="evidence-form-submit-button"
         onClick={onSubmit}
         className="w-full bg-primary hover:bg-primary/90 text-white rounded-sm shadow-glow h-10"
       >

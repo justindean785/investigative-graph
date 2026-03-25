@@ -3,6 +3,7 @@
 # IDE and editors
 .idea/
 .vscode/
+.cursor/
 
 # Dependencies
 node_modules/
@@ -77,7 +78,10 @@ agenthub/agents/youtube/db
 .cache/
 
 # Mobile development
-android-sdk/ -e 
+android-sdk/
+
+# Local junk / accidental API dumps (repo root)
+/dy
 # Environment files
 *.env
 *.env.*
