@@ -17,7 +17,7 @@ Trace Analyst is an AI-powered OSINT (Open Source Intelligence) investigation pl
 2. **MongoDB Atlas:** Create a free cluster, then set `MONGO_URL` to your Atlas connection string in `backend/.env` (see `backend/.env.example`).
 3. **Local install:** Install `mongod` and run it on `127.0.0.1:27017` if you prefer.
 
-**Integration tests:** If `mongod` is not installed, `conftest.py` tries to start the same Docker Compose MongoDB automatically (requires Docker). If you already run the API yourself, set `REACT_APP_BACKEND_URL` before pytest to skip auto-start.
+**Integration tests:** `pytest` uses **testcontainers** to start a fresh **MongoDB 7** Docker container for the session (no local `mongod`, no compose file required). **Docker must be running.** If you already run the API yourself, set `REACT_APP_BACKEND_URL` before pytest to skip auto-start.
 
 ### Environment files
 - `backend/.env` — Copy from `backend/.env.example`. Must include `MONGO_URL` and `DB_NAME=trace_analyst`. Optional: `EMERGENT_LLM_KEY` / `GEMINI_API_KEY` for AI chat features.
@@ -31,6 +31,6 @@ Trace Analyst is an AI-powered OSINT (Open Source Intelligence) investigation pl
 
 ### Lint / Test / Build
 - **Backend lint**: `python3 -m flake8 backend/server.py --max-line-length=150`
-- **Backend tests**: `REACT_APP_BACKEND_URL=http://localhost:8001 python3 -m pytest backend/tests/ -v` (requires backend + MongoDB running)
+- **Backend tests**: `python3 -m pytest backend/tests/ -v` — requires **Docker** (MongoDB spins up automatically via testcontainers; no local `mongod`). To hit an already-running API instead, set `REACT_APP_BACKEND_URL` first.
 - **Frontend build**: `cd frontend && yarn build`
 - **Frontend dev**: `cd frontend && BROWSER=none yarn start`
