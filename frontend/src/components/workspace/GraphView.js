@@ -41,7 +41,7 @@ const RELATIONSHIP_TYPES = [
   'owns', 'registered', 'resolves_to', 'used_on', 'interacts_with', 'linked_to', 'employed_by', 'located_at'
 ];
 
-const GraphView = ({ investigationId, onNavigateToEvidence, onNavigateToEntities }) => {
+const GraphView = ({ investigationId, onNavigateToEvidence, onNavigateToEntities, searchQuery = '' }) => {
   const {
     entities,
     relationships,
@@ -98,13 +98,25 @@ const GraphView = ({ investigationId, onNavigateToEvidence, onNavigateToEntities
     }
   }, [investigationId]);
 
+  const query = (searchQuery || '').trim().toLowerCase();
+
   // Derive nodes from entities in the store
   const nodes = useMemo(() => {
     const centralSet = highlightInsights && centralEntityIds.length
       ? new Set(centralEntityIds)
       : null;
 
-    return entities.map((entity, index) => {
+    const visibleEntities = query
+      ? entities.filter(
+          (e) =>
+            (e.value || '').toLowerCase().includes(query) ||
+            (e.label || '').toLowerCase().includes(query) ||
+            (e.kind || '').toLowerCase().includes(query) ||
+            (e.notes || '').toLowerCase().includes(query)
+        )
+      : entities;
+
+    return visibleEntities.map((entity, index) => {
       const typeInfo = ENTITY_TYPES.find(t => t.value === entity.kind) || ENTITY_TYPES[0];
       const savedPosition = ui.graphLayout.positions[entity.id];
       const angle = (index / Math.max(entities.length, 1)) * 2 * Math.PI;
@@ -133,11 +145,31 @@ const GraphView = ({ investigationId, onNavigateToEvidence, onNavigateToEntities
         }
       };
     });
-  }, [entities, ui.graphLayout.positions, selectEntity, highlightInsights, centralEntityIds]);
+  }, [entities, ui.graphLayout.positions, selectEntity, highlightInsights, centralEntityIds, query]);
 
   // Derive edges from relationships in the store
   const edges = useMemo(() => {
-    return relationships.map(rel => ({
+    const visibleEntityIds = query
+      ? new Set(
+          entities
+            .filter(
+              (e) =>
+                (e.value || '').toLowerCase().includes(query) ||
+                (e.label || '').toLowerCase().includes(query) ||
+                (e.kind || '').toLowerCase().includes(query) ||
+                (e.notes || '').toLowerCase().includes(query)
+            )
+            .map((e) => e.id)
+        )
+      : null;
+
+    return relationships
+      .filter(
+        (rel) =>
+          !visibleEntityIds ||
+          (visibleEntityIds.has(rel.fromId) && visibleEntityIds.has(rel.toId))
+      )
+      .map(rel => ({
       id: rel.id,
       source: rel.fromId,
       target: rel.toId,
@@ -162,7 +194,7 @@ const GraphView = ({ investigationId, onNavigateToEvidence, onNavigateToEntities
         fillOpacity: 0.9,
       }
     }));
-  }, [relationships]);
+  }, [relationships, entities, query]);
 
   const [flowNodes, setFlowNodes, onNodesChange] = useNodesState(nodes);
   const [flowEdges, setFlowEdges, onEdgesChange] = useEdgesState(edges);

@@ -7,7 +7,7 @@ export const API_KEY = process.env.REACT_APP_API_KEY;
 if (!API_KEY) {
   console.error(
     '[Trace Analyst] REACT_APP_API_KEY is not set. ' +
-    'API calls will fail with 401. Set this variable in frontend/.env.'
+    'Set it in frontend/.env to match the backend API_KEY (no default is embedded in the bundle for beta builds).'
   );
 }
 

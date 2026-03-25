@@ -34,6 +34,7 @@ const InvestigationWorkspace = () => {
     setRelationships,
     setTimeline,
     setEvidence,
+    setAISuggestions,
     clearInvestigation,
   } = useInvestigationStore();
 
@@ -118,6 +119,24 @@ const InvestigationWorkspace = () => {
       setRelationships(mappedRelationships);
       setTimeline(mappedTimeline);
       setEvidence(mappedEvidence);
+
+      try {
+        const sugRes = await axios.get(`${API}/investigations/${id}/suggestions`);
+        const mappedSuggestions = (sugRes.data || []).map((s) => ({
+          id: s.id,
+          type: s.suggestion_type || 'lead',
+          title: s.title,
+          description: s.description || '',
+          confidence: 0.7,
+          actions: s.action_data && Object.keys(s.action_data).length > 0
+            ? [{ kind: 'CUSTOM', payload: s.action_data }]
+            : [],
+          status: s.status || 'pending',
+        }));
+        setAISuggestions(mappedSuggestions);
+      } catch {
+        setAISuggestions([]);
+      }
     } catch (error) {
       console.error('Failed to load investigation:', error);
       toast.error('Failed to load investigation');
@@ -388,6 +407,7 @@ const InvestigationWorkspace = () => {
               investigationId={id}
               onNavigateToEvidence={() => navigateToTab('evidence')}
               onNavigateToEntities={() => navigateToTab('entities')}
+              searchQuery={globalSearch}
             />
           )}
           {activeTab === 'leads' && (
@@ -395,6 +415,7 @@ const InvestigationWorkspace = () => {
               investigationId={id}
               onNavigateToEvidence={() => navigateToTab('evidence')}
               onNavigateToEntities={() => navigateToTab('entities')}
+              searchQuery={globalSearch}
             />
           )}
           {activeTab === 'timeline' && (

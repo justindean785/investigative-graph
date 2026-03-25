@@ -9,11 +9,11 @@ Trace Analyst is an AI-powered OSINT (Open Source Intelligence) investigation pl
 |---------|---------|------|-------|
 | MongoDB | `mongod --dbpath /tmp/mongodb/data --logpath /tmp/mongodb/log/mongod.log --fork --bind_ip 127.0.0.1` | 27017 | Must start before backend |
 | Backend | `cd /workspace/backend && uvicorn server:app --host 0.0.0.0 --port 8001 --reload` | 8001 | Requires `MONGO_URL` and `DB_NAME` env vars (loaded from `backend/.env`) |
-| Frontend | `cd /workspace/frontend && BROWSER=none yarn start` | 3000 | Requires `REACT_APP_BACKEND_URL=http://localhost:8001` (loaded from `frontend/.env`) |
+| Frontend | `cd /workspace/frontend && BROWSER=none yarn start` | 3000 | Requires `REACT_APP_BACKEND_URL` and `REACT_APP_API_KEY` (same value as backend `API_KEY`; see `frontend/.env.example`) |
 
 ### Environment files
 - `backend/.env` — Must contain `MONGO_URL=mongodb://localhost:27017` and `DB_NAME=trace_analyst`. Optional: `EMERGENT_LLM_KEY` for AI chat features.
-- `frontend/.env` — Must contain `REACT_APP_BACKEND_URL=http://localhost:8001`.
+- `frontend/.env` — Must contain `REACT_APP_BACKEND_URL` and `REACT_APP_API_KEY` (must match backend `API_KEY`). Copy from `frontend/.env.example`.
 
 ### Non-obvious caveats
 - The `emergentintegrations` Python package is a private Emergent platform package not available on PyPI. A local stub is installed from `/tmp/emergentintegrations_stub/` to satisfy the import. AI chat/suggestion features return a placeholder message without a real `EMERGENT_LLM_KEY`.

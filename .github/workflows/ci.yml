@@ -51,3 +51,29 @@ jobs:
           python -m pytest backend/tests/ -v --tb=short
         env:
           PYTHONPATH: ${{ github.workspace }}/backend
+
+  frontend-build:
+    name: Frontend production build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "yarn"
+          cache-dependency-path: frontend/yarn.lock
+
+      - name: Install and build
+        working-directory: frontend
+        run: |
+          yarn install --frozen-lockfile
+          yarn build
+        env:
+          CI: "true"
+          REACT_APP_BACKEND_URL: "http://localhost:8001"
+          REACT_APP_API_KEY: "trace-analyst-secret-2026"
