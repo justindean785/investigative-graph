@@ -521,6 +521,19 @@ ENTITY_PATTERNS = {
 
 # ============= CONTENT EXTRACTION FUNCTIONS =============
 
+_SSRF_BLOCKED_HOSTNAMES = frozenset(
+    {
+        "localhost",
+        "127.0.0.1",
+        "::1",
+        "0.0.0.0",
+        "metadata.google.internal",
+        "metadata",
+        "169.254.169.254",
+    }
+)
+
+
 def _is_ssrf_blocked_url(url: str) -> Optional[str]:
     """Return a reason string if the URL targets a private/internal address, else None."""
     from urllib.parse import urlparse
@@ -531,6 +544,11 @@ def _is_ssrf_blocked_url(url: str) -> Optional[str]:
         hostname = parsed.hostname
         if not hostname:
             return "URL has no hostname."
+        hn = hostname.lower().rstrip(".")
+        if hn in _SSRF_BLOCKED_HOSTNAMES:
+            return f"Hostname '{hostname}' is not permitted for URL fetch."
+        if hn.endswith(".local") or hn.endswith(".internal") or hn.endswith(".localhost"):
+            return f"Hostname '{hostname}' resolves to a restricted namespace and is not permitted."
         # Resolve to IP(s) and check for private/loopback/link-local ranges
         try:
             addrinfos = socket.getaddrinfo(hostname, None)
@@ -1848,7 +1866,8 @@ async def update_evidence(
 @api_router.get("/investigations/{investigation_id}/suggestions", response_model=List[AISuggestion])
 async def get_suggestions(investigation_id: str, x_api_key: str = Header(None)):
     await validate_api_key(x_api_key)
-    
+    await get_investigation_or_404(investigation_id)
+
     suggestions = await db.ai_suggestions.find(
         {"investigation_id": investigation_id, "status": "pending"},
         {"_id": 0}
@@ -2030,6 +2049,7 @@ Format as JSON array with structure:
             suggestions_data = json.loads(response_text)
             
             # Store suggestions in database
+            stored_for_client = []
             for sug_data in suggestions_data:
                 suggestion = AISuggestion(
                     investigation_id=input.investigation_id,
@@ -2040,7 +2060,16 @@ Format as JSON array with structure:
                 )
                 doc = serialize_datetime(suggestion.model_dump())
                 await db.ai_suggestions.insert_one(doc)
-            
+                stored_for_client.append(
+                    {
+                        "id": suggestion.id,
+                        "suggestion_type": suggestion.suggestion_type,
+                        "title": suggestion.title,
+                        "description": suggestion.description,
+                        "action_data": suggestion.action_data,
+                    }
+                )
+
             await create_timeline_event(
                 input.investigation_id,
                 "ai_analysis",
@@ -2051,7 +2080,8 @@ Format as JSON array with structure:
                 "success": True,
                 "model_used": model_name,
                 "suggestions_count": len(suggestions_data),
-                "suggestions": suggestions_data
+                "suggestions": suggestions_data,
+                "stored_suggestions": stored_for_client,
             }
         except json.JSONDecodeError:
             # Fallback: create generic suggestion from raw response text
@@ -2069,7 +2099,16 @@ Format as JSON array with structure:
                 "success": True,
                 "model_used": model_name,
                 "suggestions_count": 1,
-                "raw_response": response
+                "raw_response": response,
+                "stored_suggestions": [
+                    {
+                        "id": suggestion.id,
+                        "suggestion_type": suggestion.suggestion_type,
+                        "title": suggestion.title,
+                        "description": suggestion.description,
+                        "action_data": suggestion.action_data,
+                    }
+                ],
             }
     
     except Exception as e:
