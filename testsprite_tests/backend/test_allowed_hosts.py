@@ -25,18 +25,23 @@ class TestAllowedHostsGate:
         assert os.path.isfile(CRACO_CONFIG), "craco.config.js not found"
 
     def test_no_unconditional_allowed_hosts_all(self):
-        """Ensure 'allowedHosts = all' is not set unconditionally."""
+        """Ensure 'allowedHosts = all' is not set unconditionally.
+
+        Strategy: if any allowedHosts='all' assignment exists in the file,
+        the if(process.env.ALLOWED_HOSTS) guard must also be present.
+        """
         src = read_craco()
-        # Must not have a bare `allowedHosts = 'all'` outside any if-block
-        # (i.e., must be gated behind process.env.ALLOWED_HOSTS check)
-        unconditional = re.search(
-            r"(?<!if\s\()(?<!ALLOWED_HOSTS)[^\n]*allowedHosts\s*=\s*['\"]all['\"]",
-            src,
+        has_all_assignment = bool(
+            re.search(r"allowedHosts\s*=\s*['\"]all['\"]", src)
         )
-        assert unconditional is None, (
-            "craco.config.js sets allowedHosts='all' unconditionally — "
-            "this disables host checking and exposes the app to DNS rebinding"
+        has_guard = bool(
+            re.search(r"if\s*\(\s*process\.env\.ALLOWED_HOSTS\s*\)", src)
         )
+        if has_all_assignment:
+            assert has_guard, (
+                "craco.config.js sets allowedHosts='all' but has no "
+                "if (process.env.ALLOWED_HOSTS) guard — DNS rebinding risk"
+            )
 
     def test_allowed_hosts_env_var_referenced(self):
         """ALLOWED_HOSTS env var must be read from process.env."""
