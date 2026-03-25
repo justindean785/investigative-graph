@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { Lightbulb, RefreshCw, Search, ChevronRight, AlertTriangle, Link2, Users, Wallet, Globe, Clock, CheckCircle, XCircle, Eye, Loader2, Zap } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -58,7 +58,7 @@ const SEVERITY_CONFIG = {
   low: { color: '#06b6d4', bg: 'bg-cyan-500/10', border: 'border-cyan-500/30', text: 'text-cyan-400' }
 };
 
-const LeadsWorkspace = ({ investigationId, onNavigateToEvidence, onNavigateToEntities }) => {
+const LeadsWorkspace = ({ investigationId, onNavigateToEvidence, onNavigateToEntities, searchQuery = '' }) => {
   const { entities, relationships } = useInvestigationStore();
   
   const [leads, setLeads] = useState([]);
@@ -124,9 +124,20 @@ const LeadsWorkspace = ({ investigationId, onNavigateToEvidence, onNavigateToEnt
     description: 'Investigation lead'
   };
 
-  const filteredLeads = statusFilter === 'all' 
-    ? leads 
-    : leads.filter(l => l.status === statusFilter);
+  const q = (searchQuery || '').trim().toLowerCase();
+
+  const filteredLeads = useMemo(() => {
+    let list = statusFilter === 'all' ? leads : leads.filter((l) => l.status === statusFilter);
+    if (q) {
+      list = list.filter(
+        (l) =>
+          (l.title || '').toLowerCase().includes(q) ||
+          (l.description || '').toLowerCase().includes(q) ||
+          (l.lead_type || '').toLowerCase().includes(q)
+      );
+    }
+    return list;
+  }, [leads, statusFilter, q]);
 
   const leadsByStatus = {
     new: leads.filter(l => l.status === 'new').length,

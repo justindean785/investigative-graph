@@ -49,6 +49,8 @@ mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
+from investigation_engine import get_investigation_engine  # noqa: E402
+
 API_KEY = os.environ.get('API_KEY', 'trace-analyst-secret-2026')
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY') or os.environ.get('EMERGENT_LLM_KEY')
 
@@ -521,6 +523,19 @@ ENTITY_PATTERNS = {
 
 # ============= CONTENT EXTRACTION FUNCTIONS =============
 
+_SSRF_BLOCKED_HOSTNAMES = frozenset(
+    {
+        "localhost",
+        "127.0.0.1",
+        "::1",
+        "0.0.0.0",
+        "metadata.google.internal",
+        "metadata",
+        "169.254.169.254",
+    }
+)
+
+
 def _is_ssrf_blocked_url(url: str) -> Optional[str]:
     """Return a reason string if the URL targets a private/internal address, else None."""
     from urllib.parse import urlparse
@@ -531,6 +546,11 @@ def _is_ssrf_blocked_url(url: str) -> Optional[str]:
         hostname = parsed.hostname
         if not hostname:
             return "URL has no hostname."
+        hn = hostname.lower().rstrip(".")
+        if hn in _SSRF_BLOCKED_HOSTNAMES:
+            return f"Hostname '{hostname}' is not permitted for URL fetch."
+        if hn.endswith(".local") or hn.endswith(".internal") or hn.endswith(".localhost"):
+            return f"Hostname '{hostname}' resolves to a restricted namespace and is not permitted."
         # Resolve to IP(s) and check for private/loopback/link-local ranges
         try:
             addrinfos = socket.getaddrinfo(hostname, None)
@@ -890,6 +910,11 @@ def generate_mock_enrichment(entity_type: str, entity_value: str) -> Dict[str, A
     return base_enrichment
 
 
+def _graph_entity_type(entity: Dict) -> str:
+    """Normalize entity type for graph analysis (API uses entity_type; some documents may use kind)."""
+    return (entity.get("entity_type") or entity.get("kind") or "unknown") or "unknown"
+
+
 def analyze_graph_intelligence(entities: List[Dict], relationships: List[Dict]) -> Dict[str, Any]:
     """Perform graph analysis to detect clusters, central nodes, and suspicious patterns"""
     if not entities:
@@ -926,7 +951,7 @@ def analyze_graph_intelligence(entities: List[Dict], relationships: List[Dict]) 
             central_nodes.append({
                 "entity_id": entity_id,
                 "label": entity.get("label") or entity.get("value"),
-                "type": entity.get("entity_type"),
+                "type": _graph_entity_type(entity),
                 "connection_count": degree,
                 "importance": "high" if degree >= 3 else "medium"
             })
@@ -952,12 +977,12 @@ def analyze_graph_intelligence(entities: List[Dict], relationships: List[Dict]) 
                 clusters.append({
                     "id": f"cluster_{len(clusters)+1}",
                     "size": len(cluster),
-                    "entity_types": list(set(e.get("entity_type") for e in cluster_entities)),
+                    "entity_types": list({_graph_entity_type(e) for e in cluster_entities}),
                     "entities": [
                         {
                             "id": e["id"],
                             "label": e.get("label") or e.get("value"),
-                            "type": e.get("entity_type")
+                            "type": _graph_entity_type(e)
                         }
                         for e in cluster_entities
                     ],
@@ -983,7 +1008,7 @@ def analyze_graph_intelligence(entities: List[Dict], relationships: List[Dict]) 
     for entity_id, degree in centrality_scores.items():
         if degree >= 3 and entity_id in entity_map:
             entity = entity_map[entity_id]
-            if entity.get("entity_type") in ["email", "wallet", "domain"]:
+            if _graph_entity_type(entity) in ["email", "wallet", "domain"]:
                 suspicious_patterns.append({
                     "type": "hub_entity",
                     "severity": "medium",
@@ -993,7 +1018,7 @@ def analyze_graph_intelligence(entities: List[Dict], relationships: List[Dict]) 
     
     # Find interesting paths (between high-risk entities)
     shortest_paths = []
-    high_risk_entities = [e for e in entities if e.get("entity_type") in ["wallet", "person"]]
+    high_risk_entities = [e for e in entities if _graph_entity_type(e) in ["wallet", "person"]]
     if len(high_risk_entities) >= 2:
         # BFS for shortest path — use deque for O(1) popleft instead of O(n) list.pop(0)
         def find_path(start, end):
@@ -1022,7 +1047,7 @@ def analyze_graph_intelligence(entities: List[Dict], relationships: List[Dict]) 
                         "to": e2.get("label") or e2.get("value"),
                         "length": len(path) - 1,
                         "path": [
-                            {"id": e["id"], "label": e.get("label") or e.get("value"), "type": e.get("entity_type")}
+                            {"id": e["id"], "label": e.get("label") or e.get("value"), "type": _graph_entity_type(e)}
                             for e in path_entities if e
                         ]
                     })
@@ -1572,7 +1597,8 @@ async def delete_investigation(investigation_id: str, x_api_key: str = Header(No
     await db.ai_suggestions.delete_many({"investigation_id": investigation_id})
     await db.investigation_leads.delete_many({"investigation_id": investigation_id})
     await db.chat_messages.delete_many({"investigation_id": investigation_id})
-    
+    await get_investigation_engine(db.investigation_states).delete_state(investigation_id)
+
     return {"success": True, "message": "Investigation and all related data deleted"}
 
 # ============= ENTITIES =============
@@ -1843,7 +1869,8 @@ async def update_evidence(
 @api_router.get("/investigations/{investigation_id}/suggestions", response_model=List[AISuggestion])
 async def get_suggestions(investigation_id: str, x_api_key: str = Header(None)):
     await validate_api_key(x_api_key)
-    
+    await get_investigation_or_404(investigation_id)
+
     suggestions = await db.ai_suggestions.find(
         {"investigation_id": investigation_id, "status": "pending"},
         {"_id": 0}
@@ -2025,6 +2052,7 @@ Format as JSON array with structure:
             suggestions_data = json.loads(response_text)
             
             # Store suggestions in database
+            stored_for_client = []
             for sug_data in suggestions_data:
                 suggestion = AISuggestion(
                     investigation_id=input.investigation_id,
@@ -2035,7 +2063,16 @@ Format as JSON array with structure:
                 )
                 doc = serialize_datetime(suggestion.model_dump())
                 await db.ai_suggestions.insert_one(doc)
-            
+                stored_for_client.append(
+                    {
+                        "id": suggestion.id,
+                        "suggestion_type": suggestion.suggestion_type,
+                        "title": suggestion.title,
+                        "description": suggestion.description,
+                        "action_data": suggestion.action_data,
+                    }
+                )
+
             await create_timeline_event(
                 input.investigation_id,
                 "ai_analysis",
@@ -2046,7 +2083,8 @@ Format as JSON array with structure:
                 "success": True,
                 "model_used": model_name,
                 "suggestions_count": len(suggestions_data),
-                "suggestions": suggestions_data
+                "suggestions": suggestions_data,
+                "stored_suggestions": stored_for_client,
             }
         except json.JSONDecodeError:
             # Fallback: create generic suggestion from raw response text
@@ -2064,7 +2102,16 @@ Format as JSON array with structure:
                 "success": True,
                 "model_used": model_name,
                 "suggestions_count": 1,
-                "raw_response": response
+                "raw_response": response,
+                "stored_suggestions": [
+                    {
+                        "id": suggestion.id,
+                        "suggestion_type": suggestion.suggestion_type,
+                        "title": suggestion.title,
+                        "description": suggestion.description,
+                        "action_data": suggestion.action_data,
+                    }
+                ],
             }
     
     except Exception as e:
@@ -3286,6 +3333,89 @@ async def export_investigation_markdown(
         headers={"Content-Disposition": f'attachment; filename="{case_id}_report.md"'},
     )
 
+
+# ============= AUTONOMOUS INVESTIGATION ENGINE (persisted) =============
+
+@api_router.get("/investigations/{investigation_id}/engine-state")
+async def get_investigation_engine_state(
+    investigation_id: str,
+    x_api_key: Optional[str] = Header(None),
+):
+    """Debug / UI: current autonomous investigation engine snapshot (Mongo-backed)."""
+    await validate_api_key(x_api_key)
+    await get_investigation_or_404(investigation_id)
+    eng = get_investigation_engine(db.investigation_states)
+    st = await eng.get_public_state(investigation_id)
+    return st.model_dump(mode="json")
+
+
+@api_router.post("/investigations/{investigation_id}/engine/sync-cache")
+async def sync_investigation_engine_cache(
+    investigation_id: str,
+    x_api_key: Optional[str] = Header(None),
+):
+    """
+    Drop in-memory engine cache and reload from MongoDB (simulates process restart).
+    Intended for tests and operational debugging.
+    """
+    await validate_api_key(x_api_key)
+    await get_investigation_or_404(investigation_id)
+    eng = get_investigation_engine(db.investigation_states)
+    st = await eng.sync_cache_from_db(investigation_id)
+    return {
+        "success": True,
+        "status": st.status,
+        "step_index": st.step_index,
+        "events_count": len(st.events),
+    }
+
+
+@api_router.post("/investigations/{investigation_id}/engine/run")
+async def run_investigation_engine_stream(
+    investigation_id: str,
+    x_api_key: Optional[str] = Header(None),
+):
+    """
+    Stream autonomous investigation events as NDJSON (one JSON object per line).
+    State is persisted to Mongo after each event so runs survive backend restarts.
+    """
+    await validate_api_key(x_api_key)
+    await get_investigation_or_404(investigation_id)
+
+    from fastapi.responses import StreamingResponse
+
+    eng = get_investigation_engine(db.investigation_states)
+
+    async def event_lines():
+        async for ev in eng.investigate(investigation_id):
+            line = json.dumps(ev.model_dump(mode="json"), default=str) + "\n"
+            yield line.encode("utf-8")
+
+    return StreamingResponse(event_lines(), media_type="application/x-ndjson")
+
+
+@api_router.post("/investigations/{investigation_id}/engine/run-complete")
+async def run_investigation_engine_complete(
+    investigation_id: str,
+    x_api_key: Optional[str] = Header(None),
+):
+    """Run the autonomous engine to completion and return all events (test / tooling helper)."""
+    await validate_api_key(x_api_key)
+    await get_investigation_or_404(investigation_id)
+    eng = get_investigation_engine(db.investigation_states)
+    events = []
+    async for ev in eng.investigate(investigation_id):
+        events.append(ev.model_dump(mode="json"))
+    st = await eng.get_public_state(investigation_id)
+    return {
+        "success": True,
+        "events": events,
+        "status": st.status,
+        "step_index": st.step_index,
+        "events_persisted_count": len(st.events),
+    }
+
+
 # Include the router in the main app
 app.include_router(api_router)
 
@@ -3319,6 +3449,10 @@ async def create_indexes():
     await db.investigation_leads.create_index("investigation_id")
     await db.investigation_leads.create_index([("id", 1), ("investigation_id", 1)])
     await db.chat_messages.create_index([("investigation_id", 1), ("session_id", 1)])
+    await db.investigation_states.create_index("investigation_id", unique=True)
+    restored = await get_investigation_engine(db.investigation_states).restore_running_from_mongo()
+    if restored:
+        logger.info("InvestigationEngine: restored %d in-progress run(s)", restored)
     logger.info("MongoDB indexes created")
 
 @app.on_event("shutdown")

@@ -278,6 +278,21 @@ class TestQuickIngest:
         else:
             print("⚠ URL ingest: URL fetch failed (expected in some environments)")
 
+    def test_ingest_url_blocks_internal_metadata(self, headers, test_investigation):
+        """URL ingest must reject cloud metadata / link-local targets (SSRF)."""
+        investigation_id = test_investigation["id"]
+        response = requests.post(
+            f"{BASE_URL}/api/investigations/{investigation_id}/ingest/url",
+            json={
+                "url": "http://169.254.169.254/latest/meta-data/",
+                "evidence_type": "webpage",
+            },
+            headers=headers,
+        )
+        assert response.status_code == 400
+        detail = str(response.json().get("detail", "")).lower()
+        assert "fetch" in detail or "permit" in detail or "private" in detail or "not permitted" in detail
+
 
 class TestAIChat:
     """Test AI Chat endpoints"""

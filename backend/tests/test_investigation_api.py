@@ -6,6 +6,7 @@ import pytest
 import requests
 import os
 import uuid
+import json
 
 BASE_URL = os.environ.get('REACT_APP_BACKEND_URL', '').rstrip('/')
 API_KEY = "trace-analyst-secret-2026"
@@ -806,6 +807,121 @@ class TestExport:
         assert "# Investigation Report:" in body
         assert "## Entities" in body
         print("Markdown export contains expected sections")
+
+
+class TestInvestigationEnginePersistence:
+    """Autonomous investigation engine: Mongo-backed state survives simulated restart."""
+
+    @pytest.fixture
+    def investigation_id(self):
+        payload = {
+            "name": f"TEST_EnginePersist_{uuid.uuid4().hex[:8]}",
+            "description": "Engine persistence test",
+        }
+        response = requests.post(
+            f"{BASE_URL}/api/investigations",
+            json=payload,
+            headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
+        )
+        assert response.status_code == 200
+        inv_id = response.json()["id"]
+        yield inv_id
+        requests.delete(
+            f"{BASE_URL}/api/investigations/{inv_id}",
+            headers={"x-api-key": API_KEY},
+        )
+
+    def test_engine_state_endpoint(self, investigation_id):
+        r = requests.get(
+            f"{BASE_URL}/api/investigations/{investigation_id}/engine-state",
+            headers={"x-api-key": API_KEY},
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["investigation_id"] == investigation_id
+        assert "status" in data
+        assert "events" in data
+        print("engine-state OK")
+
+    def test_engine_state_survives_simulated_restart(self, investigation_id):
+        """Partial NDJSON stream, then sync-cache simulates cold memory; state must match Mongo."""
+        resp = requests.post(
+            f"{BASE_URL}/api/investigations/{investigation_id}/engine/run",
+            headers={"x-api-key": API_KEY},
+            stream=True,
+            timeout=60,
+        )
+        assert resp.status_code == 200
+        first_line = None
+        for line in resp.iter_lines(decode_unicode=True):
+            if line:
+                first_line = line
+                break
+        resp.close()
+        assert first_line is not None
+        ev0 = json.loads(first_line)
+        assert "kind" in ev0 and "message" in ev0
+
+        sync = requests.post(
+            f"{BASE_URL}/api/investigations/{investigation_id}/engine/sync-cache",
+            headers={"x-api-key": API_KEY},
+        )
+        assert sync.status_code == 200
+        assert sync.json().get("success") is True
+
+        st = requests.get(
+            f"{BASE_URL}/api/investigations/{investigation_id}/engine-state",
+            headers={"x-api-key": API_KEY},
+        ).json()
+        assert st["investigation_id"] == investigation_id
+        assert st["status"] == "running"
+        assert st["step_index"] >= 1
+        assert len(st["events"]) >= 1
+        print("simulated restart: partial run state restored from Mongo")
+
+        done = requests.post(
+            f"{BASE_URL}/api/investigations/{investigation_id}/engine/run-complete",
+            headers={"x-api-key": API_KEY},
+            timeout=120,
+        )
+        assert done.status_code == 200
+        body = done.json()
+        assert body["success"] is True
+        assert body["status"] == "completed"
+        assert len(body["events"]) >= 1
+        final = requests.get(
+            f"{BASE_URL}/api/investigations/{investigation_id}/engine-state",
+            headers={"x-api-key": API_KEY},
+        ).json()
+        assert final["status"] == "completed"
+        assert any(e.get("kind") == "completed" for e in final["events"])
+        print("engine completed after resume")
+
+    def test_engine_full_run_persists(self, investigation_id):
+        r = requests.post(
+            f"{BASE_URL}/api/investigations/{investigation_id}/engine/run-complete",
+            headers={"x-api-key": API_KEY},
+            timeout=120,
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["status"] == "completed"
+        assert data["events_persisted_count"] == len(data["events"])
+
+        sync = requests.post(
+            f"{BASE_URL}/api/investigations/{investigation_id}/engine/sync-cache",
+            headers={"x-api-key": API_KEY},
+        )
+        assert sync.status_code == 200
+
+        st = requests.get(
+            f"{BASE_URL}/api/investigations/{investigation_id}/engine-state",
+            headers={"x-api-key": API_KEY},
+        ).json()
+        assert st["status"] == "completed"
+        assert len(st["events"]) >= len(data["events"])
+        print("full engine run persisted")
+
 
 # Cleanup test data
 @pytest.fixture(scope="session", autouse=True)

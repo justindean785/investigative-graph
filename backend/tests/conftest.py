@@ -1,21 +1,20 @@
 """
 Shared test configuration and fixtures for backend integration tests.
 
-This conftest.py automatically starts MongoDB and the FastAPI backend server
-before running integration tests, and tears them down afterward.
+Starts a real MongoDB in Docker (testcontainers) and the FastAPI app once per
+pytest session. No local mongod binary is required — only Docker.
 
-Key design: We use pytest_configure() (runs before test collection) to set
-REACT_APP_BACKEND_URL in the environment so that test modules pick up the
-correct BASE_URL at import time.
+If REACT_APP_BACKEND_URL is already set (e.g. you started the API manually),
+all auto-start logic is skipped.
 """
-import pytest
+import os
 import subprocess
+import sys
 import tempfile
 import time
-import os
-import sys
-import shutil
 import socket
+
+import requests
 
 # ---------------------------------------------------------------------------
 # Paths & constants
@@ -24,36 +23,15 @@ BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SERVER_HOST = "0.0.0.0"
 SERVER_PORT = 8001
 BASE_URL = f"http://localhost:{SERVER_PORT}"
-MONGO_PORT = 27017
 TEST_DB_NAME = "trace_analyst_test"
 _TMP = tempfile.gettempdir()
-MONGO_DATA_DIR = os.path.join(_TMP, "test_mongodb_data")
-MONGO_LOG = os.path.join(_TMP, "test_mongodb.log")
 
-# Track processes so we can clean up
-_mongo_proc = None
+_mongo_container = None
 _server_proc = None
 _env_created = False
 
 
-def _find_mongod():
-    """Locate the mongod binary (system install, conda, or PATH)."""
-    mongod = shutil.which("mongod")
-    if mongod:
-        return mongod
-    # Check common conda/anaconda installation paths
-    for candidate in [
-        "/usr/share/miniconda/bin/mongod",
-        os.path.expanduser("~/miniconda3/bin/mongod"),
-        os.path.expanduser("~/anaconda3/bin/mongod"),
-    ]:
-        if os.path.isfile(candidate):
-            return candidate
-    return None
-
-
 def _wait_for_port(host, port, timeout=30):
-    """Block until *host:port* accepts a TCP connection."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -65,27 +43,24 @@ def _wait_for_port(host, port, timeout=30):
 
 
 def _wait_for_http(url, timeout=30, headers=None):
-    """Block until a GET to *url* returns HTTP 200."""
-    import requests as _requests
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
-            resp = _requests.get(url, headers=headers or {}, timeout=3)
+            resp = requests.get(url, headers=headers or {}, timeout=3)
             if resp.status_code == 200:
                 return True
-        except _requests.ConnectionError:
+        except requests.ConnectionError:
             time.sleep(0.5)
     return False
 
 
 def _ensure_emergent_stub():
-    """Install a lightweight stub for the private emergentintegrations package
-    so that server.py can import it without errors."""
+    """Install a lightweight stub for the private emergentintegrations package."""
     try:
         from emergentintegrations.llm.chat import LlmChat
         chat = LlmChat()
-        if hasattr(chat, 'with_model'):
-            return  # already installed with correct API
+        if hasattr(chat, "with_model"):
+            return
     except (ImportError, TypeError):
         pass
 
@@ -115,7 +90,6 @@ def _ensure_emergent_stub():
             '        self.system_message = kwargs.get("system_message", "")\n'
             '\n'
             '    def with_model(self, provider="", model=""):\n'
-            '        """Chain method - returns self for fluent API compatibility."""\n'
             '        self.provider = provider\n'
             '        self.model = model\n'
             '        return self\n'
@@ -132,67 +106,58 @@ def _ensure_emergent_stub():
     )
 
 
-# ---------------------------------------------------------------------------
-# pytest_configure runs BEFORE test collection – ideal for setting env vars
-# that test modules read at import time.
-# ---------------------------------------------------------------------------
 def pytest_configure(config):
-    """Early hook: start MongoDB + backend, set REACT_APP_BACKEND_URL."""
-    global _mongo_proc, _server_proc, _env_created
+    """Session setup: MongoDB (testcontainers) + uvicorn + REACT_APP_BACKEND_URL."""
+    global _mongo_container, _server_proc, _env_created
 
-    # If URL is already set (e.g. user started server manually), skip setup
-    existing_url = os.environ.get("REACT_APP_BACKEND_URL", "").strip()
-    if existing_url:
+    if os.environ.get("REACT_APP_BACKEND_URL", "").strip():
         return
 
-    # 1. Ensure emergent stub
     _ensure_emergent_stub()
 
-    # 2. Start MongoDB
-    mongod = _find_mongod()
-    if mongod:
-        os.makedirs(MONGO_DATA_DIR, exist_ok=True)
-        if not _wait_for_port("127.0.0.1", MONGO_PORT, timeout=1):
-            _mongo_proc = subprocess.Popen(
-                [
-                    mongod,
-                    "--dbpath", MONGO_DATA_DIR,
-                    "--logpath", MONGO_LOG,
-                    "--bind_ip", "127.0.0.1",
-                    "--port", str(MONGO_PORT),
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            if not _wait_for_port("127.0.0.1", MONGO_PORT, timeout=30):
-                raise RuntimeError("MongoDB failed to start")
-    else:
-        if not _wait_for_port("127.0.0.1", MONGO_PORT, timeout=2):
-            raise RuntimeError(
-                "mongod binary not found and MongoDB is not running on port 27017. "
-                "Install MongoDB or start it before running tests."
-            )
+    try:
+        from testcontainers.mongodb import MongoDbContainer
+    except ImportError as e:
+        raise RuntimeError(
+            "testcontainers[mongodb] is required to run integration tests. "
+            "Install dependencies (pip install -r backend/requirements.txt) "
+            "and ensure Docker is running."
+        ) from e
 
-    # 3. Write .env if needed
+    _mongo_container = MongoDbContainer("mongo:7")
+    try:
+        _mongo_container.start()
+    except Exception as e:
+        _mongo_container = None
+        raise RuntimeError(
+            "Could not start MongoDB via testcontainers. "
+            "Is Docker running? (Docker Desktop / dockerd required.)"
+        ) from e
+
+    mongo_url = _mongo_container.get_connection_url()
+
     env_path = os.path.join(BACKEND_DIR, ".env")
     if not os.path.exists(env_path):
         _env_created = True
         with open(env_path, "w") as f:
-            f.write("MONGO_URL=mongodb://localhost:27017\n")
+            f.write(f"MONGO_URL={mongo_url}\n")
             f.write(f"DB_NAME={TEST_DB_NAME}\n")
 
-    # 4. Start FastAPI server
     if not _wait_for_port("127.0.0.1", SERVER_PORT, timeout=1):
         server_env = os.environ.copy()
-        server_env["MONGO_URL"] = "mongodb://localhost:27017"
+        server_env["MONGO_URL"] = mongo_url
         server_env["DB_NAME"] = TEST_DB_NAME
 
         _server_proc = subprocess.Popen(
             [
-                sys.executable, "-m", "uvicorn",
+                sys.executable,
+                "-m",
+                "uvicorn",
                 "server:app",
-                "--host", SERVER_HOST,
-                "--port", str(SERVER_PORT),
+                "--host",
+                SERVER_HOST,
+                "--port",
+                str(SERVER_PORT),
             ],
             cwd=BACKEND_DIR,
             env=server_env,
@@ -203,7 +168,7 @@ def pytest_configure(config):
         api_key = os.environ.get("API_KEY", "trace-analyst-secret-2026")
         if not _wait_for_http(
             f"{BASE_URL}/api/",
-            timeout=30,
+            timeout=45,
             headers={"x-api-key": api_key},
         ):
             if _server_proc.poll() is None:
@@ -211,18 +176,22 @@ def pytest_configure(config):
             out = ""
             if _server_proc.stdout:
                 out = _server_proc.stdout.read().decode(errors="replace")
+            if _mongo_container is not None:
+                try:
+                    _mongo_container.stop()
+                except Exception:
+                    pass
+                _mongo_container = None
             raise RuntimeError(
                 f"Backend server failed to start on port {SERVER_PORT}.\n"
                 f"Server output:\n{out}"
             )
 
-    # 5. Set the env var so test modules pick it up at import time
     os.environ["REACT_APP_BACKEND_URL"] = BASE_URL
 
 
 def pytest_unconfigure(config):
-    """Teardown: stop server and MongoDB if we started them."""
-    global _mongo_proc, _server_proc, _env_created
+    global _mongo_container, _server_proc, _env_created
 
     if _server_proc and _server_proc.poll() is None:
         _server_proc.terminate()
@@ -231,12 +200,12 @@ def pytest_unconfigure(config):
         except subprocess.TimeoutExpired:
             _server_proc.kill()
 
-    if _mongo_proc and _mongo_proc.poll() is None:
-        _mongo_proc.terminate()
+    if _mongo_container is not None:
         try:
-            _mongo_proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            _mongo_proc.kill()
+            _mongo_container.stop()
+        except Exception:
+            pass
+        _mongo_container = None
 
     if _env_created:
         env_path = os.path.join(BACKEND_DIR, ".env")

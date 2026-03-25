@@ -13,6 +13,71 @@ const SUGGESTION_CONFIG = {
   enrichment: { icon: Plus, color: '#7c3aed', label: 'Enrichment' },
 };
 
+/** Map Gemini / legacy action_data shapes into executable ADD_ENTITY / ADD_EDGE steps. */
+function actionsFromActionData(actionData) {
+  if (!actionData || typeof actionData !== 'object') return [];
+  const out = [];
+
+  if (Array.isArray(actionData.actions)) {
+    for (const a of actionData.actions) {
+      if (a && typeof a === 'object') {
+        out.push({ kind: a.kind || a.type, payload: a.payload || a });
+      }
+    }
+    return out;
+  }
+
+  if (actionData.kind === 'ADD_ENTITY' || actionData.kind === 'ADD_EDGE') {
+    const { kind, ...rest } = actionData;
+    return [{ kind: actionData.kind, payload: rest }];
+  }
+
+  const et = actionData.entity_type || actionData.type;
+  if (et && actionData.value) {
+    out.push({
+      kind: 'ADD_ENTITY',
+      payload: {
+        entity_type: et,
+        value: String(actionData.value),
+        label: actionData.label || String(actionData.value),
+        notes: actionData.notes || '',
+        confidence: typeof actionData.confidence === 'number' ? actionData.confidence : 0.7,
+        risk_score: typeof actionData.risk_score === 'number' ? actionData.risk_score : 0,
+        sources: Array.isArray(actionData.sources) ? actionData.sources : [],
+      },
+    });
+  }
+
+  const sid = actionData.source_entity_id || actionData.from_id;
+  const tid = actionData.target_entity_id || actionData.to_id;
+  if (sid && tid) {
+    out.push({
+      kind: 'ADD_EDGE',
+      payload: {
+        source_entity_id: sid,
+        target_entity_id: tid,
+        relationship_type: actionData.relationship_type || actionData.relType || 'linked_to',
+        label: actionData.label || actionData.relationship_type || 'linked_to',
+        confidence: typeof actionData.confidence === 'number' ? actionData.confidence : 0.5,
+      },
+    });
+  }
+
+  if (out.length === 0 && Object.keys(actionData).length > 0) {
+    out.push({ kind: 'CUSTOM', payload: actionData });
+  }
+  return out;
+}
+
+function resolveExecutableActions(suggestion) {
+  if (!suggestion?.actions?.length) return [];
+  const acts = suggestion.actions;
+  if (acts.length === 1 && acts[0].kind === 'CUSTOM' && acts[0].payload) {
+    return actionsFromActionData(acts[0].payload);
+  }
+  return acts;
+}
+
 const AISuggestionsWorkspace = ({ investigationId, onNavigateToEvidence }) => {
   const { entities, relationships, aiSuggestions, acceptAISuggestion, dismissAISuggestion, setAISuggestions, addEntity, addRelationship, setEntities, setRelationships } = useInvestigationStore();
 
@@ -36,16 +101,31 @@ const AISuggestionsWorkspace = ({ investigationId, onNavigateToEvidence }) => {
       });
 
       if (response.data.success) {
-        // Convert API suggestions to store format
-        const suggestions = response.data.suggestions?.map((sug, idx) => ({
-          id: `sug-${Date.now()}-${idx}`,
-          type: sug.suggestion_type || 'lead',
-          title: sug.title,
-          description: sug.description,
-          confidence: sug.confidence || 0.7,
-          actions: sug.action_data ? [{ kind: 'CUSTOM', payload: sug.action_data }] : [],
-          status: 'pending',
-        })) || [];
+        const stored = response.data.stored_suggestions;
+        let suggestions = [];
+
+        if (Array.isArray(stored) && stored.length > 0) {
+          suggestions = stored.map((sug) => ({
+            id: sug.id,
+            type: sug.suggestion_type || 'lead',
+            title: sug.title,
+            description: sug.description || '',
+            confidence: sug.confidence || 0.7,
+            actions: actionsFromActionData(sug.action_data),
+            status: 'pending',
+          }));
+        } else {
+          suggestions =
+            response.data.suggestions?.map((sug, idx) => ({
+              id: `sug-${Date.now()}-${idx}`,
+              type: sug.suggestion_type || 'lead',
+              title: sug.title,
+              description: sug.description,
+              confidence: sug.confidence || 0.7,
+              actions: actionsFromActionData(sug.action_data),
+              status: 'pending',
+            })) || [];
+        }
 
         setAISuggestions([...aiSuggestions, ...suggestions]);
         toast.success(`AI analysis complete! ${response.data.suggestions_count || suggestions.length} suggestions generated`);
@@ -66,9 +146,11 @@ const AISuggestionsWorkspace = ({ investigationId, onNavigateToEvidence }) => {
         params: { status: 'accepted' }
       });
 
-      // Persist any ADD_ENTITY / ADD_EDGE actions carried in action_data
-      if (suggestion?.actions) {
-        for (const action of suggestion.actions) {
+      const actions = resolveExecutableActions(suggestion);
+
+      // Persist any ADD_ENTITY / ADD_EDGE actions
+      if (actions.length) {
+        for (const action of actions) {
           if (action.kind === 'ADD_ENTITY' && action.payload?.entity_type && action.payload?.value) {
             try {
               const res = await axios.post(`${API}/investigations/${investigationId}/entities`, action.payload);

@@ -9,7 +9,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# emergentintegrations is a private package; strip it for public/docker builds (matches CI)
+RUN grep -v "emergentintegrations" requirements.txt > /tmp/req.txt \
+    && pip install --no-cache-dir -r /tmp/req.txt
 
 COPY . .
 

@@ -56,7 +56,7 @@ const Dashboard = () => {
 
   const filteredInvestigations = useMemo(() => investigations.filter(inv =>
     inv.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    inv.description.toLowerCase().includes(searchQuery.toLowerCase())
+    (inv.description || '').toLowerCase().includes(searchQuery.toLowerCase())
   ), [investigations, searchQuery]);
 
   const formatDate = (dateString) => {
