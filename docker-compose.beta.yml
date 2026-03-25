@@ -1,0 +1,45 @@
+# Beta stack: MongoDB + API + static frontend (nginx).
+# One command: ./beta-deploy.sh   OR   docker compose -f docker-compose.beta.yml up --build -d
+#
+# Prerequisites:
+# - Copy backend/.env.example → backend/.env (set API_KEY, see beta notes there)
+# - For the frontend image build, Compose substitutes REACT_APP_API_KEY from your
+#   environment or a repo-root `.env` file (same value as backend API_KEY).
+version: "3.9"
+
+services:
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    volumes:
+      - mongo_beta_data:/data/db
+
+  backend:
+    build: ./backend
+    ports:
+      - "8001:8001"
+    env_file:
+      - ./backend/.env
+    environment:
+      MONGO_URL: mongodb://mongo:27017
+      CORS_ORIGINS: http://localhost:3000
+    depends_on:
+      - mongo
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # Browser talks to same origin; nginx proxies /api/ to backend (see frontend/nginx.conf)
+        REACT_APP_BACKEND_URL: http://localhost:3000
+        REACT_APP_API_KEY: ${REACT_APP_API_KEY:-trace-analyst-secret-2026}
+    ports:
+      # Container serves nginx on 80; published as host :3000 for the URL in AGENTS.md
+      - "3000:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  mongo_beta_data:

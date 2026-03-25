@@ -30,6 +30,23 @@ Trace Analyst is an AI-powered OSINT (Open Source Intelligence) investigation pl
 - ESLint is integrated into CRA/CRACO (runs during `yarn start` and `yarn build`), not as a standalone config. There is no `eslint.config.js` file.
 - Python dependencies install to `~/.local` (user site-packages). Ensure `$HOME/.local/bin` is on `PATH` for CLI tools like `flake8`, `black`, `uvicorn`.
 
+### Beta Testing – One Command Deploy
+
+From the repo root (Docker Desktop / Docker Engine required):
+
+```bash
+docker compose -f docker-compose.beta.yml up --build -d
+```
+
+Or run **`./beta-deploy.sh`** (same command).
+
+- **App:** http://localhost:3000 (nginx serves the React build and proxies `/api/` to the backend)
+- **API (direct):** http://localhost:8001
+
+Before first run, copy **`backend/.env.example`** → **`backend/.env`** and set **`API_KEY`** (see beta notes in that file). For the frontend image, Compose injects **`REACT_APP_API_KEY`** from your shell or a **repo-root `.env`** — it must match **`API_KEY`**.
+
+**Smoke test:** wait ~10s after `up`, open http://localhost:3000, create a case, exercise the app. Restart only the backend container (`docker compose -f docker-compose.beta.yml restart backend`), refresh the browser — investigation data and autonomous engine state should still be present (MongoDB persists).
+
 ### Lint / Test / Build
 - **Backend lint**: `python3 -m flake8 backend/server.py --max-line-length=150`
 - **Backend tests**: `python3 -m pytest backend/tests/ -v` — requires **Docker** (MongoDB spins up automatically via testcontainers; no local `mongod`). To hit an already-running API instead, set `REACT_APP_BACKEND_URL` first.
