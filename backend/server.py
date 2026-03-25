@@ -890,6 +890,11 @@ def generate_mock_enrichment(entity_type: str, entity_value: str) -> Dict[str, A
     return base_enrichment
 
 
+def _graph_entity_type(entity: Dict) -> str:
+    """Normalize entity type for graph analysis (API uses entity_type; some documents may use kind)."""
+    return (entity.get("entity_type") or entity.get("kind") or "unknown") or "unknown"
+
+
 def analyze_graph_intelligence(entities: List[Dict], relationships: List[Dict]) -> Dict[str, Any]:
     """Perform graph analysis to detect clusters, central nodes, and suspicious patterns"""
     if not entities:
@@ -926,7 +931,7 @@ def analyze_graph_intelligence(entities: List[Dict], relationships: List[Dict]) 
             central_nodes.append({
                 "entity_id": entity_id,
                 "label": entity.get("label") or entity.get("value"),
-                "type": entity.get("entity_type"),
+                "type": _graph_entity_type(entity),
                 "connection_count": degree,
                 "importance": "high" if degree >= 3 else "medium"
             })
@@ -952,12 +957,12 @@ def analyze_graph_intelligence(entities: List[Dict], relationships: List[Dict]) 
                 clusters.append({
                     "id": f"cluster_{len(clusters)+1}",
                     "size": len(cluster),
-                    "entity_types": list(set(e.get("entity_type") for e in cluster_entities)),
+                    "entity_types": list({_graph_entity_type(e) for e in cluster_entities}),
                     "entities": [
                         {
                             "id": e["id"],
                             "label": e.get("label") or e.get("value"),
-                            "type": e.get("entity_type")
+                            "type": _graph_entity_type(e)
                         }
                         for e in cluster_entities
                     ],
@@ -983,7 +988,7 @@ def analyze_graph_intelligence(entities: List[Dict], relationships: List[Dict]) 
     for entity_id, degree in centrality_scores.items():
         if degree >= 3 and entity_id in entity_map:
             entity = entity_map[entity_id]
-            if entity.get("entity_type") in ["email", "wallet", "domain"]:
+            if _graph_entity_type(entity) in ["email", "wallet", "domain"]:
                 suspicious_patterns.append({
                     "type": "hub_entity",
                     "severity": "medium",
@@ -993,7 +998,7 @@ def analyze_graph_intelligence(entities: List[Dict], relationships: List[Dict]) 
     
     # Find interesting paths (between high-risk entities)
     shortest_paths = []
-    high_risk_entities = [e for e in entities if e.get("entity_type") in ["wallet", "person"]]
+    high_risk_entities = [e for e in entities if _graph_entity_type(e) in ["wallet", "person"]]
     if len(high_risk_entities) >= 2:
         # BFS for shortest path — use deque for O(1) popleft instead of O(n) list.pop(0)
         def find_path(start, end):
@@ -1022,7 +1027,7 @@ def analyze_graph_intelligence(entities: List[Dict], relationships: List[Dict]) 
                         "to": e2.get("label") or e2.get("value"),
                         "length": len(path) - 1,
                         "path": [
-                            {"id": e["id"], "label": e.get("label") or e.get("value"), "type": e.get("entity_type")}
+                            {"id": e["id"], "label": e.get("label") or e.get("value"), "type": _graph_entity_type(e)}
                             for e in path_entities if e
                         ]
                     })

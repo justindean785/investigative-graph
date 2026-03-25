@@ -9,7 +9,7 @@ import ReactFlow, {
   Panel,
 } from 'reactflow';
 import 'reactflow/dist/style.css';
-import { Plus, Link2, Trash2, X, Network, ArrowRight, FileBox, Users } from 'lucide-react';
+import { Plus, Link2, Trash2, X, Network, ArrowRight, FileBox, Users, Sparkles, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
@@ -56,6 +56,9 @@ const GraphView = ({ investigationId, onNavigateToEvidence, onNavigateToEntities
   const [showAddEntity, setShowAddEntity] = useState(false);
   const [showAddRelationship, setShowAddRelationship] = useState(false);
   const [selectedNode, setSelectedNode] = useState(null);
+  const [graphAnalysis, setGraphAnalysis] = useState(null);
+  const [graphInsightLoading, setGraphInsightLoading] = useState(false);
+  const [highlightInsights, setHighlightInsights] = useState(true);
 
   const [newEntity, setNewEntity] = useState({
     entity_type: 'person',
@@ -72,8 +75,35 @@ const GraphView = ({ investigationId, onNavigateToEvidence, onNavigateToEntities
     label: ''
   });
 
+  const centralEntityIds = useMemo(
+    () => (graphAnalysis?.central_nodes || []).map((c) => c.entity_id).filter(Boolean),
+    [graphAnalysis]
+  );
+
+  const fetchGraphIntelligence = useCallback(async () => {
+    if (!investigationId) return;
+    setGraphInsightLoading(true);
+    try {
+      const { data } = await axios.post(`${API}/investigations/${investigationId}/graph/analyze`, {});
+      if (data.success && data.analysis) {
+        setGraphAnalysis(data.analysis);
+        setHighlightInsights(true);
+        toast.success('Graph intelligence updated');
+      }
+    } catch (err) {
+      console.error('Graph analysis failed:', err);
+      toast.error('Could not run graph intelligence');
+    } finally {
+      setGraphInsightLoading(false);
+    }
+  }, [investigationId]);
+
   // Derive nodes from entities in the store
   const nodes = useMemo(() => {
+    const centralSet = highlightInsights && centralEntityIds.length
+      ? new Set(centralEntityIds)
+      : null;
+
     return entities.map((entity, index) => {
       const typeInfo = ENTITY_TYPES.find(t => t.value === entity.kind) || ENTITY_TYPES[0];
       const savedPosition = ui.graphLayout.positions[entity.id];
@@ -95,6 +125,7 @@ const GraphView = ({ investigationId, onNavigateToEvidence, onNavigateToEntities
           color: typeInfo.color,
           confidence: entity.confidence,
           risk_score: entity.risk / 100,
+          insightHighlight: !!(centralSet && centralSet.has(entity.id)),
           onClick: () => {
             setSelectedNode(entity);
             selectEntity(entity.id);
@@ -102,7 +133,7 @@ const GraphView = ({ investigationId, onNavigateToEvidence, onNavigateToEntities
         }
       };
     });
-  }, [entities, ui.graphLayout.positions, selectEntity]);
+  }, [entities, ui.graphLayout.positions, selectEntity, highlightInsights, centralEntityIds]);
 
   // Derive edges from relationships in the store
   const edges = useMemo(() => {
@@ -236,6 +267,82 @@ const GraphView = ({ investigationId, onNavigateToEvidence, onNavigateToEntities
     }
   };
 
+  React.useEffect(() => {
+    setGraphAnalysis(null);
+    setHighlightInsights(true);
+  }, [investigationId]);
+
+  const graphIntelPanel = (
+    <Panel position="top-right" className="max-w-sm w-[min(22rem,calc(100vw-2rem))] pointer-events-auto">
+      <div className="glass-strong border border-white/10 rounded-sm p-3 text-left shadow-lg">
+        <div className="flex items-center justify-between gap-2 mb-2">
+          <span className="text-xs font-semibold text-cyan-500/90 uppercase tracking-wider">Graph intelligence</span>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={graphInsightLoading}
+            onClick={() => fetchGraphIntelligence()}
+            className="h-7 text-[11px] px-2 border-white/15 text-slate-200 hover:bg-white/10"
+          >
+            {graphInsightLoading ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            ) : (
+              <>
+                <Sparkles className="w-3.5 h-3.5 mr-1" />
+                Analyze
+              </>
+            )}
+          </Button>
+        </div>
+        {graphAnalysis && (
+          <>
+            <label className="flex items-center gap-2 text-[11px] text-slate-400 mb-2 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={highlightInsights}
+                onChange={(e) => setHighlightInsights(e.target.checked)}
+                className="rounded border-white/20 bg-black/40"
+              />
+              Highlight top hub nodes
+            </label>
+            <p className="text-xs text-slate-300 leading-relaxed mb-2">{graphAnalysis.summary}</p>
+            {graphAnalysis.graph_stats && (
+              <div className="text-[11px] font-mono text-slate-500 space-y-0.5 mb-2 border-t border-white/10 pt-2">
+                <p>
+                  Entities {graphAnalysis.graph_stats.total_entities} · Edges{' '}
+                  {graphAnalysis.graph_stats.total_relationships}
+                </p>
+                <p>Avg degree {graphAnalysis.graph_stats.avg_connections?.toFixed?.(2) ?? graphAnalysis.graph_stats.avg_connections}</p>
+              </div>
+            )}
+            {(graphAnalysis.clusters?.length > 0 || graphAnalysis.suspicious_patterns?.length > 0) && (
+              <div className="max-h-36 overflow-y-auto text-[11px] text-slate-400 space-y-2 border-t border-white/10 pt-2">
+                {graphAnalysis.clusters?.slice(0, 3).map((c) => (
+                  <p key={c.id}>
+                    <span className="text-amber-400/90">Cluster</span> {c.id}: {c.size} nodes
+                  </p>
+                ))}
+                {graphAnalysis.suspicious_patterns?.slice(0, 2).map((p, i) => (
+                  <p key={`${p.type}-${i}`} className="leading-snug">
+                    <span className="text-rose-400/90 capitalize">{p.type?.replace(/_/g, ' ')}</span>
+                    {' — '}
+                    {p.description}
+                  </p>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+        {!graphAnalysis && !graphInsightLoading && (
+          <p className="text-[11px] text-slate-500 leading-relaxed">
+            Run analysis to detect clusters, hub entities, and suspicious patterns from the live investigation graph.
+          </p>
+        )}
+      </div>
+    </Panel>
+  );
+
   // Empty state - guide users to build the investigation first
   if (entities.length === 0) {
     return (
@@ -323,6 +430,7 @@ const GraphView = ({ investigationId, onNavigateToEvidence, onNavigateToEntities
                 </Button>
               </div>
             </Panel>
+            {graphIntelPanel}
           </ReactFlow>
         </div>
       </div>
@@ -491,6 +599,7 @@ const GraphView = ({ investigationId, onNavigateToEvidence, onNavigateToEntities
             </DialogContent>
           </Dialog>
         </Panel>
+        {graphIntelPanel}
       </ReactFlow>
 
       {/* Entity Detail Drawer */}

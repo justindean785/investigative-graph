@@ -2,6 +2,8 @@ import React from 'react';
 import { Handle, Position } from 'reactflow';
 
 const CustomNode = ({ data }) => {
+  const insightHighlight = Boolean(data.insightHighlight);
+
   return (
     <div
       onClick={data.onClick}
@@ -11,10 +13,14 @@ const CustomNode = ({ data }) => {
       <Handle type="target" position={Position.Top} className="!bg-[#00d9ff] !border-2 !border-[#0a1628]" />
       
       <div
-        className="bg-[#112240] border-2 rounded-full w-20 h-20 flex items-center justify-center transition-all duration-300 group-hover:scale-110"
+        className={`bg-[#112240] border-2 rounded-full w-20 h-20 flex items-center justify-center transition-all duration-300 group-hover:scale-110 ${
+          insightHighlight ? 'ring-2 ring-amber-400/90 ring-offset-2 ring-offset-[#0a0a0a]' : ''
+        }`}
         style={{
           borderColor: data.color || '#00d9ff',
-          boxShadow: `0 0 10px ${data.color || '#00d9ff'}40`
+          boxShadow: insightHighlight
+            ? `0 0 16px rgba(251, 191, 36, 0.45), 0 0 10px ${data.color || '#00d9ff'}40`
+            : `0 0 10px ${data.color || '#00d9ff'}40`
         }}
       >
         <div className="text-center">
