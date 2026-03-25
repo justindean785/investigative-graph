@@ -1,15 +1,42 @@
-# Optional: local MongoDB only. From repo root: docker compose up -d
-# Then set backend/.env: MONGO_URL=mongodb://127.0.0.1:27017  DB_NAME=trace_analyst
+version: "3.9"
 
 services:
-  mongo:
+  mongodb:
     image: mongo:7
-    container_name: trace-analyst-mongo
-    restart: unless-stopped
+    container_name: trace_mongodb
     ports:
       - "27017:27017"
     volumes:
-      - trace_analyst_mongo_data:/data/db
+      - mongo_data:/data/db
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: trace_backend
+    ports:
+      - "8001:8001"
+    env_file:
+      - ./backend/.env
+    environment:
+      - MONGO_URL=mongodb://mongodb:27017
+      - DB_NAME=trace_analyst
+      - CORS_ORIGINS=http://localhost:3000
+    depends_on:
+      - mongodb
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: trace_frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
 
 volumes:
-  trace_analyst_mongo_data:
+  mongo_data:

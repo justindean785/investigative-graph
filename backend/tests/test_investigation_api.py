@@ -522,8 +522,8 @@ class TestAIAnalysis:
             headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
             timeout=30
         )
-        # API may fail if no valid LLM key, but should return proper response
-        assert response.status_code in [200, 500]
+        # API may fail if no valid LLM key (500) or key not configured (503)
+        assert response.status_code in [200, 500, 503]
         if response.status_code == 200:
             data = response.json()
             assert "success" in data
