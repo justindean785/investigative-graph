@@ -24,6 +24,7 @@ Trace Analyst is an AI-powered OSINT (Open Source Intelligence) investigation pl
 - `frontend/.env` — Must contain `REACT_APP_BACKEND_URL` and `REACT_APP_API_KEY` (must match backend `API_KEY`). Copy from `frontend/.env.example`.
 
 ### Non-obvious caveats
+- **Autonomous investigation engine** (`/api/investigations/{id}/engine/*`) persists full run state to MongoDB collection `investigation_states` after each streamed event, so in-progress and completed passes survive backend restarts; startup restores `running` / `paused` runs into memory.
 - The `emergentintegrations` Python package is a private Emergent platform package not available on PyPI. A local stub is installed from `/tmp/emergentintegrations_stub/` to satisfy the import. AI chat/suggestion features return a placeholder message without a real `EMERGENT_LLM_KEY`.
 - The API requires an `x-api-key` header for all requests. Default key: `trace-analyst-secret-2026`.
 - ESLint is integrated into CRA/CRACO (runs during `yarn start` and `yarn build`), not as a standalone config. There is no `eslint.config.js` file.

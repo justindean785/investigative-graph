@@ -49,6 +49,8 @@ mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
+from investigation_engine import get_investigation_engine  # noqa: E402
+
 API_KEY = os.environ.get('API_KEY', 'trace-analyst-secret-2026')
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY') or os.environ.get('EMERGENT_LLM_KEY')
 
@@ -1595,7 +1597,8 @@ async def delete_investigation(investigation_id: str, x_api_key: str = Header(No
     await db.ai_suggestions.delete_many({"investigation_id": investigation_id})
     await db.investigation_leads.delete_many({"investigation_id": investigation_id})
     await db.chat_messages.delete_many({"investigation_id": investigation_id})
-    
+    await get_investigation_engine(db.investigation_states).delete_state(investigation_id)
+
     return {"success": True, "message": "Investigation and all related data deleted"}
 
 # ============= ENTITIES =============
@@ -3330,6 +3333,89 @@ async def export_investigation_markdown(
         headers={"Content-Disposition": f'attachment; filename="{case_id}_report.md"'},
     )
 
+
+# ============= AUTONOMOUS INVESTIGATION ENGINE (persisted) =============
+
+@api_router.get("/investigations/{investigation_id}/engine-state")
+async def get_investigation_engine_state(
+    investigation_id: str,
+    x_api_key: Optional[str] = Header(None),
+):
+    """Debug / UI: current autonomous investigation engine snapshot (Mongo-backed)."""
+    await validate_api_key(x_api_key)
+    await get_investigation_or_404(investigation_id)
+    eng = get_investigation_engine(db.investigation_states)
+    st = await eng.get_public_state(investigation_id)
+    return st.model_dump(mode="json")
+
+
+@api_router.post("/investigations/{investigation_id}/engine/sync-cache")
+async def sync_investigation_engine_cache(
+    investigation_id: str,
+    x_api_key: Optional[str] = Header(None),
+):
+    """
+    Drop in-memory engine cache and reload from MongoDB (simulates process restart).
+    Intended for tests and operational debugging.
+    """
+    await validate_api_key(x_api_key)
+    await get_investigation_or_404(investigation_id)
+    eng = get_investigation_engine(db.investigation_states)
+    st = await eng.sync_cache_from_db(investigation_id)
+    return {
+        "success": True,
+        "status": st.status,
+        "step_index": st.step_index,
+        "events_count": len(st.events),
+    }
+
+
+@api_router.post("/investigations/{investigation_id}/engine/run")
+async def run_investigation_engine_stream(
+    investigation_id: str,
+    x_api_key: Optional[str] = Header(None),
+):
+    """
+    Stream autonomous investigation events as NDJSON (one JSON object per line).
+    State is persisted to Mongo after each event so runs survive backend restarts.
+    """
+    await validate_api_key(x_api_key)
+    await get_investigation_or_404(investigation_id)
+
+    from fastapi.responses import StreamingResponse
+
+    eng = get_investigation_engine(db.investigation_states)
+
+    async def event_lines():
+        async for ev in eng.investigate(investigation_id):
+            line = json.dumps(ev.model_dump(mode="json"), default=str) + "\n"
+            yield line.encode("utf-8")
+
+    return StreamingResponse(event_lines(), media_type="application/x-ndjson")
+
+
+@api_router.post("/investigations/{investigation_id}/engine/run-complete")
+async def run_investigation_engine_complete(
+    investigation_id: str,
+    x_api_key: Optional[str] = Header(None),
+):
+    """Run the autonomous engine to completion and return all events (test / tooling helper)."""
+    await validate_api_key(x_api_key)
+    await get_investigation_or_404(investigation_id)
+    eng = get_investigation_engine(db.investigation_states)
+    events = []
+    async for ev in eng.investigate(investigation_id):
+        events.append(ev.model_dump(mode="json"))
+    st = await eng.get_public_state(investigation_id)
+    return {
+        "success": True,
+        "events": events,
+        "status": st.status,
+        "step_index": st.step_index,
+        "events_persisted_count": len(st.events),
+    }
+
+
 # Include the router in the main app
 app.include_router(api_router)
 
@@ -3363,6 +3449,10 @@ async def create_indexes():
     await db.investigation_leads.create_index("investigation_id")
     await db.investigation_leads.create_index([("id", 1), ("investigation_id", 1)])
     await db.chat_messages.create_index([("investigation_id", 1), ("session_id", 1)])
+    await db.investigation_states.create_index("investigation_id", unique=True)
+    restored = await get_investigation_engine(db.investigation_states).restore_running_from_mongo()
+    if restored:
+        logger.info("InvestigationEngine: restored %d in-progress run(s)", restored)
     logger.info("MongoDB indexes created")
 
 @app.on_event("shutdown")
