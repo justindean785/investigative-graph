@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Activity, Zap, CheckCircle, AlertCircle, TrendingUp, Link2, FileText, Pause, Play } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
-import { BACKEND_URL, API_KEY } from '@/config/api';
+import { BACKEND_URL } from '@/config/api';
+import axios from '@/config/api';
 
 const EVENT_ICONS = {
   entity_discovered: TrendingUp,
@@ -67,13 +68,27 @@ const LiveFeed = ({ investigationId, onInvestigationDataMayHaveChanged }) => {
     [onInvestigationDataMayHaveChanged]
   );
 
-  const connectToStream = useCallback(() => {
+  const connectToStream = useCallback(async () => {
     if (eventSourceRef.current) {
       eventSourceRef.current.close();
     }
 
+    let streamToken;
+    try {
+      const { data } = await axios.post(
+        `${BACKEND_URL}/api/investigations/${investigationId}/stream-token`
+      );
+      streamToken = data.stream_token;
+    } catch (err) {
+      console.error('Failed to obtain stream token:', err);
+      const delay = retryDelayMsRef.current;
+      retryDelayMsRef.current = Math.min(Math.round(delay * 1.5), 30000);
+      retryTimeoutRef.current = setTimeout(connectToStream, delay);
+      return;
+    }
+
     const eventSource = new EventSource(
-      `${BACKEND_URL}/api/investigations/${investigationId}/stream?api_key=${encodeURIComponent(API_KEY)}`
+      `${BACKEND_URL}/api/investigations/${investigationId}/stream?stream_token=${encodeURIComponent(streamToken)}`
     );
 
     eventSource.onopen = () => {

@@ -189,6 +189,10 @@ investigation_engine = None
 import asyncio as _asyncio  # noqa: E402
 _investigation_event_queues: Dict[str, list] = {}  # investigation_id -> list of asyncio.Queue
 
+# Short-lived stream tokens: token -> {"investigation_id": str, "expires_at": float}
+_stream_tokens: Dict[str, dict] = {}
+_STREAM_TOKEN_TTL_SECONDS = 60
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -2157,17 +2161,49 @@ async def get_investigation_auto_status(
     }
 
 
+@api_router.post("/investigations/{investigation_id}/stream-token")
+async def issue_stream_token(investigation_id: str, x_api_key: Optional[str] = Header(None)):
+    """Issue a short-lived one-time token for opening the SSE stream.
+
+    The token is valid for _STREAM_TOKEN_TTL_SECONDS seconds and can only be
+    used once, avoiding the need to expose the long-lived API key in the SSE URL.
+    """
+    await validate_api_key(x_api_key)
+    # Purge expired tokens lazily to avoid unbounded growth
+    now = _time.monotonic()
+    expired = [t for t, v in _stream_tokens.items() if v["expires_at"] < now]
+    for t in expired:
+        _stream_tokens.pop(t, None)
+    token = str(uuid.uuid4())
+    _stream_tokens[token] = {
+        "investigation_id": investigation_id,
+        "expires_at": now + _STREAM_TOKEN_TTL_SECONDS,
+    }
+    return {"stream_token": token, "ttl_seconds": _STREAM_TOKEN_TTL_SECONDS}
+
+
 @api_router.get("/investigations/{investigation_id}/stream")
 async def stream_investigation_events(
     investigation_id: str,
     x_api_key: Optional[str] = Header(None),
-    api_key: Optional[str] = None,
+    stream_token: Optional[str] = None,
 ):
-    """SSE stream of real-time investigation events."""
-    key = x_api_key or api_key
-    if not key:
-        raise HTTPException(status_code=401, detail="Missing API key")
-    await validate_api_key(key)
+    """SSE stream of real-time investigation events.
+
+    Authentication is either via x-api-key header or a short-lived stream_token
+    obtained from the /stream-token endpoint.  Passing the long-lived api_key
+    directly as a query parameter is no longer supported.
+    """
+    if stream_token is not None:
+        entry = _stream_tokens.pop(stream_token, None)
+        if entry is None or entry["expires_at"] < _time.monotonic():
+            raise HTTPException(status_code=401, detail="Invalid or expired stream token")
+        if entry["investigation_id"] != investigation_id:
+            raise HTTPException(status_code=403, detail="Stream token investigation mismatch")
+    elif x_api_key is not None:
+        await validate_api_key(x_api_key)
+    else:
+        raise HTTPException(status_code=401, detail="Missing authentication")
 
     queue = _asyncio.Queue(maxsize=256)
     _investigation_event_queues.setdefault(investigation_id, []).append(queue)
