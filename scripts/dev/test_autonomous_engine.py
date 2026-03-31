@@ -1,12 +1,23 @@
 """
 Manual autonomous-engine exercise. Requires backend + Mongo. Not part of pytest.
 Run: python scripts/dev/test_autonomous_engine.py
+
+Set API_KEY env var before running:
+  Windows:  set API_KEY=your-key-here
+  Linux/Mac: export API_KEY=your-key-here
 """
-import requests
+
+import os
 import time
 
+import requests
+
 API_URL = "http://localhost:8001/api"
-API_KEY = "trace-analyst-secret-2026"
+API_KEY = os.environ.get("API_KEY", "")
+if not API_KEY:
+    raise SystemExit(
+        "ERROR: API_KEY environment variable is not set. See script docstring."
+    )
 HEADERS = {"x-api-key": API_KEY}
 
 
@@ -104,7 +115,10 @@ def main():
             print("⚠ Investigation not started yet")
             continue
 
-        if status["processed_count"] != last_processed or status["entities_discovered"] != last_discovered:
+        if (
+            status["processed_count"] != last_processed
+            or status["entities_discovered"] != last_discovered
+        ):
             print(f"Status: {status['status']}")
             print(f"  Processed: {status['processed_count']}")
             print(f"  Discovered: {status['entities_discovered']}")
@@ -146,7 +160,9 @@ def main():
 
     print("\nSample Entities:")
     for ent in entities[:5]:
-        print(f"  [{ent['entity_type']}] {ent['value']} (confidence: {ent.get('confidence', 0):.2f})")
+        print(
+            f"  [{ent['entity_type']}] {ent['value']} (confidence: {ent.get('confidence', 0):.2f})"
+        )
 
     rel_types = {}
     for rel in relationships:
@@ -158,13 +174,16 @@ def main():
         print(f"  {rtype}: {count}")
 
     if entities:
-        max_depth_reached = max((e.get("metadata", {}).get("depth", 0) for e in entities), default=0)
+        max_depth_reached = max(
+            (e.get("metadata", {}).get("depth", 0) for e in entities), default=0
+        )
         print(f"\nMax Pivot Depth: {max_depth_reached}")
 
     derived_entities = [
         e
         for e in entities
-        if e.get("sources") and any("derived_from" in str(s) for s in e.get("sources", []))
+        if e.get("sources")
+        and any("derived_from" in str(s) for s in e.get("sources", []))
     ]
     print(f"Derived Entities: {len(derived_entities)}")
 

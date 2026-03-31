@@ -1,9 +1,22 @@
-"""Manual OSINT smoke test. Requires backend on localhost:8001. Not part of pytest."""
-import requests
+"""Manual OSINT smoke test. Requires backend on localhost:8001. Not part of pytest.
+
+Set API_KEY env var before running:
+  Windows:  set API_KEY=your-key-here
+  Linux/Mac: export API_KEY=your-key-here
+"""
+
 import json
+import os
+
+import requests
 
 BASE = "http://localhost:8001"
-H = {"x-api-key": "trace-analyst-secret-2026", "Content-Type": "application/json"}
+_api_key = os.environ.get("API_KEY", "")
+if not _api_key:
+    raise SystemExit(
+        "ERROR: API_KEY environment variable is not set. See script docstring."
+    )
+H = {"x-api-key": _api_key, "Content-Type": "application/json"}
 
 r = requests.post(
     f"{BASE}/api/osint/search",
