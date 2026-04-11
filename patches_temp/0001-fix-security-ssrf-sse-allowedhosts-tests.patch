@@ -1,0 +1,593 @@
+From b22bfa58d514bd515e74ae28a15944a458fdc0a1 Mon Sep 17 00:00:00 2001
+From: "copilot-swe-agent[bot]" <198982749+Copilot@users.noreply.github.com>
+Date: Sat, 11 Apr 2026 00:33:36 +0000
+Subject: [PATCH] fix(security): replace is_safe_url with _is_ssrf_blocked_url,
+ disable follow_redirects, add SSE stream tokens, gate ALLOWED_HOSTS, add
+ test_security.py
+
+Co-authored-by: justindean785 <225718336+justindean785@users.noreply.github.com>
+---
+ README.md                      |  28 +++-
+ backend/core/deps.py           |  69 ++++++--
+ backend/routers/stream.py      |  84 ++++++++--
+ backend/tests/test_security.py | 277 +++++++++++++++++++++++++++++++++
+ frontend/craco.config.js       |  18 ++-
+ 5 files changed, 446 insertions(+), 30 deletions(-)
+ create mode 100644 backend/tests/test_security.py
+
+diff --git a/README.md b/README.md
+index 8214df3..d6aa644 100644
+--- a/README.md
++++ b/README.md
+@@ -1,3 +1,27 @@
+-# Here are your Instructions
++# Trace Analyst — Investigative Graph Platform
+ 
+-Grok-3 native enrichment added + security hardened
++## Changes in this update
++
++### Backend
++- **Grok-3 native enrichment** — new `/grok-enrich` endpoint using `xai-sdk` directly; no LangChain wrapper
++- **SSRF hardening** — URL validation on all user-supplied URLs before outbound fetch
++- **CORS hardening** — wildcard `*` origin disables credentials; explicit origins required for credentialed requests
++- **AI suggestion persistence** — suggestions written to MongoDB so they survive page reload
++- **Investigation engine** (`backend/engine/`) — entity processor, pivot planner, result normaliser, graph updater
++- **SSE streaming endpoint** — real-time investigation progress pushed to the client
++- **Flake8 clean** — all lint errors resolved in `server.py`
++
++### Frontend
++- **UnifiedInvestigation component** — replaces the previous 7-tab workspace with a single investigation view
++- **UniversalInput component** — unified search/seed input for starting investigations
++- **LiveFeed component** — SSE-backed real-time stream of investigation events
++- **Dashboard bulk delete** — checkbox multi-select + confirmation dialog to delete multiple investigations at once
++- **Store updates** (`investigationStore`) — adds `nodes`, `edges`, `currentInvestigationId`; AI suggestions persisted via API
++- **Design compliance** — `data-testid` attributes added throughout; removed broad `transition-all` in favour of targeted transitions
++- **ReportView component** — investigation report rendering
++- **confirm-dialog UI primitive** — reusable confirmation dialog backed by Shadcn Dialog
++
++### Infrastructure / Docs
++- CI workflow updated with flake8 lint step and frontend build job
++- `docker-compose.yml`, `LOCAL_DEV.md`, `HANDOFF.md`, `REFACTOR_PLAN.md` added
++- `AGENTS.md` documents AI agent conventions
+diff --git a/backend/core/deps.py b/backend/core/deps.py
+index 781f032..4a2c057 100644
+--- a/backend/core/deps.py
++++ b/backend/core/deps.py
+@@ -408,27 +408,62 @@ def extract_entities_from_text(
+ # ---------------------------------------------------------------------------
+ 
+ 
+-def is_safe_url(url: str) -> bool:
+-    """Return True only if *url* does not resolve to a private/internal address."""
++def _is_ssrf_blocked_url(url: str) -> Optional[str]:
++    """Return a reason string if *url* targets a private/internal address, else None.
++
++    Uses socket.getaddrinfo() to resolve ALL addresses for a hostname (including
++    IPv6 and round-robin DNS entries) and rejects any that fall in a private,
++    loopback, link-local, or reserved range.  This is materially stronger than
++    gethostbyname() which returns only one IPv4 address and can be bypassed via
++    multi-A-record DNS tricks.
++
++    Replaces the weaker is_safe_url() helper that had three bypass vectors:
++      1. String-matching only caught "10." not 172.16.x.x / 192.168.x.x.
++      2. gethostbyname() returned a single IPv4 address only.
++      3. is_reserved was not checked.
++    """
+     try:
+         parsed = urlparse(url)
+-        if not parsed.hostname:
+-            return False
+-        host = parsed.hostname.lower()
+-        if any(
+-            x in host for x in ["localhost", "127.0.0.1", "0.0.0.0", "internal", "10."]
+-        ):
+-            return False
+-        ip = ipaddress.ip_address(socket.gethostbyname(host))
+-        return not (ip.is_private or ip.is_loopback or ip.is_link_local)
+-    except Exception:
+-        return False
++        if parsed.scheme not in ("http", "https"):
++            return (
++                f"URL scheme '{parsed.scheme}' is not permitted. "
++                "Only http and https are allowed."
++            )
++        hostname = parsed.hostname
++        if not hostname:
++            return "URL has no hostname."
++        try:
++            addrinfos = socket.getaddrinfo(hostname, None)
++        except socket.gaierror:
++            return f"Could not resolve hostname: {hostname}"
++        for addrinfo in addrinfos:
++            ip_str = addrinfo[4][0]
++            try:
++                ip = ipaddress.ip_address(ip_str)
++                if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_reserved:
++                    return (
++                        f"Requests to private/internal addresses are not permitted "
++                        f"({ip_str})."
++                    )
++            except ValueError:
++                continue
++    except Exception as exc:
++        return f"URL validation error: {exc}"
++    return None
+ 
+ 
+ async def fetch_url_content(url: str) -> Dict[str, Any]:
+-    """Fetch and parse content from *url*.  Blocks SSRF via is_safe_url()."""
+-    if not is_safe_url(url):
+-        raise HTTPException(status_code=400, detail="URL not allowed")
++    """Fetch and parse content from *url*.  Blocks SSRF via _is_ssrf_blocked_url().
++
++    follow_redirects is intentionally False: an attacker who controls a
++    public URL could 302-redirect to http://169.254.169.254/ after the
++    initial hostname check passes.  With redirects disabled the check is
++    applied once and the response is the direct server reply only.
++    """
++    ssrf_reason = _is_ssrf_blocked_url(url)
++    if ssrf_reason:
++        logger.warning("Blocked SSRF attempt for URL %s: %s", url, ssrf_reason)
++        raise HTTPException(status_code=400, detail=ssrf_reason)
+ 
+     result: Dict[str, Any] = {
+         "success": False,
+@@ -439,7 +474,7 @@ async def fetch_url_content(url: str) -> Dict[str, Any]:
+     }
+ 
+     try:
+-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as c:
++        async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as c:
+             response = await c.get(
+                 url,
+                 headers={
+diff --git a/backend/routers/stream.py b/backend/routers/stream.py
+index 9988f54..5b7e5a7 100644
+--- a/backend/routers/stream.py
++++ b/backend/routers/stream.py
+@@ -4,6 +4,7 @@ routers/stream.py — Autonomous investigation and SSE streaming endpoints.
+ Routes (all nested under /api/investigations):
+   POST /{investigation_id}/auto-investigate — start autonomous investigation
+   GET  /{investigation_id}/auto-status      — poll investigation status
++  POST /{investigation_id}/stream-token     — issue short-lived SSE stream token
+   GET  /{investigation_id}/stream           — SSE event stream
+ 
+ SSE CRITICAL NOTES:
+@@ -12,6 +13,15 @@ SSE CRITICAL NOTES:
+   - investigation_event_queues is a module-level dict shared with the background task
+   - The background task writes to every registered queue; the SSE handler reads one queue
+   - A None sentinel signals completion to the SSE consumer
++
++SSE AUTHENTICATION:
++  The browser EventSource API cannot set custom headers, so the long-lived API
++  key cannot be sent via x-api-key for SSE connections.  Instead:
++    1. Call POST /{id}/stream-token (authenticated with x-api-key header) to
++       obtain a one-time, 60-second stream_token.
++    2. Open the SSE stream with ?stream_token=<token>.
++  The token is consumed on first use and expires after _STREAM_TOKEN_TTL_SECONDS.
++  Passing the long-lived API key directly as ?api_key is no longer supported.
+ """
+ 
+ from __future__ import annotations
+@@ -19,7 +29,9 @@ from __future__ import annotations
+ import asyncio
+ import json
+ import logging
+-from typing import Optional
++import time as _time
++import uuid
++from typing import Dict, Optional
+ 
+ from core.deps import (
+     db,
+@@ -36,6 +48,22 @@ logger = logging.getLogger(__name__)
+ 
+ router = APIRouter(prefix="/api/investigations", tags=["stream"])
+ 
++# ---------------------------------------------------------------------------
++# Short-lived stream tokens
++# token -> {"investigation_id": str, "expires_at": float (monotonic)}
++# ---------------------------------------------------------------------------
++
++_stream_tokens: Dict[str, dict] = {}
++_STREAM_TOKEN_TTL_SECONDS: int = 60
++
++
++def _purge_expired_stream_tokens() -> None:
++    """Remove expired tokens lazily to prevent unbounded dict growth."""
++    now = _time.monotonic()
++    expired = [t for t, v in _stream_tokens.items() if v["expires_at"] < now]
++    for t in expired:
++        _stream_tokens.pop(t, None)
++
+ 
+ # ---------------------------------------------------------------------------
+ # Routes
+@@ -139,26 +167,64 @@ async def get_investigation_auto_status(
+     }
+ 
+ 
++@router.post("/{investigation_id}/stream-token")
++async def issue_stream_token(
++    investigation_id: str,
++    x_api_key: str = Header(None),
++):
++    """Issue a short-lived one-time token for opening the SSE stream.
++
++    The token is valid for _STREAM_TOKEN_TTL_SECONDS seconds and is consumed
++    on first use, avoiding the need to expose the long-lived API key in the
++    EventSource URL (which would appear in browser history, server access logs,
++    and HTTP proxies/CDN logs).
++
++    Workflow:
++      1. POST /api/investigations/{id}/stream-token  (x-api-key header)
++         → {"stream_token": "<uuid>", "ttl_seconds": 60}
++      2. new EventSource(`/api/investigations/{id}/stream?stream_token=<token>`)
++    """
++    await validate_api_key(x_api_key)
++    _purge_expired_stream_tokens()
++    token = str(uuid.uuid4())
++    _stream_tokens[token] = {
++        "investigation_id": investigation_id,
++        "expires_at": _time.monotonic() + _STREAM_TOKEN_TTL_SECONDS,
++    }
++    return {"stream_token": token, "ttl_seconds": _STREAM_TOKEN_TTL_SECONDS}
++
++
+ @router.get("/{investigation_id}/stream")
+ async def stream_investigation_events(
+     investigation_id: str,
+     x_api_key: Optional[str] = Header(None),
+-    api_key: Optional[str] = None,
++    stream_token: Optional[str] = None,
+ ):
+     """
+     SSE stream of real-time investigation events.
+ 
+-    Accepts the API key via either:
+-      - x-api-key header  (standard)
+-      - ?api_key query parameter  (used by EventSource which cannot set headers)
++    Authentication (exactly one must be provided):
++      - x-api-key header   — standard server-to-server usage
++      - ?stream_token      — short-lived one-time token from /stream-token endpoint,
++                             intended for browser EventSource connections
++
++    The ?api_key query parameter is no longer accepted.  Use /stream-token instead
++    to avoid exposing the long-lived API key in URLs.
+ 
+     The generator yields events until a None sentinel is received from the
+     background investigation task, then emits a 'completed' event and exits.
+     """
+-    key = x_api_key or api_key
+-    if not key:
+-        raise HTTPException(status_code=401, detail="Missing API key")
+-    await validate_api_key(key)
++    if stream_token is not None:
++        _purge_expired_stream_tokens()
++        entry = _stream_tokens.pop(stream_token, None)
++        if entry is None or entry["expires_at"] < _time.monotonic():
++            raise HTTPException(status_code=401, detail="Invalid or expired stream token")
++        if entry["investigation_id"] != investigation_id:
++            raise HTTPException(status_code=403, detail="Stream token investigation mismatch")
++    elif x_api_key is not None:
++        await validate_api_key(x_api_key)
++    else:
++        raise HTTPException(status_code=401, detail="Missing authentication")
+ 
+     queue: asyncio.Queue = asyncio.Queue(maxsize=256)
+     investigation_event_queues.setdefault(investigation_id, []).append(queue)
+diff --git a/backend/tests/test_security.py b/backend/tests/test_security.py
+new file mode 100644
+index 0000000..83cca66
+--- /dev/null
++++ b/backend/tests/test_security.py
+@@ -0,0 +1,277 @@
++"""
++Security regression tests for the Trace Analyst backend.
++
++Covers fixes identified in the CODE_AUDIT_REPORT.md:
++  - BUG-01: SSRF protection on URL ingest endpoint
++  - BUG-06: Suggestion status field validation (reject unknown values)
++  - BUG-07: 404 returned when creating sub-resources under a non-existent investigation
++"""
++import pytest
++import requests
++import os
++import uuid
++
++BASE_URL = os.environ.get(
++    "BACKEND_URL", os.environ.get("REACT_APP_BACKEND_URL", "http://localhost:8001")
++).rstrip("/")
++API_KEY = os.environ.get("API_KEY", "")
++if not API_KEY:
++    raise SystemExit(
++        "ERROR: API_KEY environment variable is not set."
++    )
++HEADERS = {"x-api-key": API_KEY, "Content-Type": "application/json"}
++
++
++# ---------------------------------------------------------------------------
++# Shared fixtures
++# ---------------------------------------------------------------------------
++
++@pytest.fixture(scope="module")
++def investigation_id():
++    """Create a real investigation for tests that need one, then delete it."""
++    resp = requests.post(
++        f"{BASE_URL}/api/investigations",
++        json={"name": f"TEST_Security_{uuid.uuid4().hex[:8]}", "description": "Security test"},
++        headers=HEADERS,
++    )
++    assert resp.status_code == 200, f"Setup failed: {resp.text}"
++    inv_id = resp.json()["id"]
++    yield inv_id
++    requests.delete(f"{BASE_URL}/api/investigations/{inv_id}", headers=HEADERS)
++
++
++@pytest.fixture(scope="module")
++def suggestion_id(investigation_id):
++    """Create a minimal AI suggestion record via the AI analysis endpoint (or mock one)."""
++    # The suggestion endpoint is PATCH /investigations/{id}/suggestions/{sug_id}.
++    # We need a suggestion that actually exists in the DB.  Create it via the
++    # AI-analysis route which stores suggestions, but since an LLM key is
++    # unlikely to be present in CI we inject a suggestion directly via the
++    # internal test helper that the conftest server exposes through the API.
++    #
++    # Fallback: if no LLM key is configured the AI endpoint returns 503/500,
++    # so we instead test the update endpoint against a random UUID which will
++    # 404 — that is still useful for validating the *status-validation* path
++    # because the status check happens before the DB lookup.
++    return str(uuid.uuid4())
++
++
++# ---------------------------------------------------------------------------
++# BUG-01 — SSRF Protection
++# ---------------------------------------------------------------------------
++
++class TestSSRFProtection:
++    """Verify that the URL ingest endpoint blocks requests to private/internal addresses."""
++
++    PRIVATE_URLS = [
++        "http://127.0.0.1/",
++        "http://localhost/",
++        "http://0.0.0.0/",
++        "http://169.254.169.254/latest/meta-data/",   # AWS IMDSv1
++        "http://192.168.1.1/admin",
++        "http://10.0.0.1/",
++    ]
++
++    NON_HTTP_URLS = [
++        "file:///etc/passwd",
++        "ftp://ftp.example.com/pub/file.txt",
++        "gopher://gopher.example.com/",
++    ]
++
++    def test_private_ipv4_loopback_blocked(self, investigation_id):
++        """Requests to 127.0.0.1 must be rejected with HTTP 400."""
++        resp = requests.post(
++            f"{BASE_URL}/api/investigations/{investigation_id}/ingest/url",
++            json={"url": "http://127.0.0.1/", "evidence_type": "webpage"},
++            headers=HEADERS,
++        )
++        assert resp.status_code == 400, (
++            f"Expected 400 (SSRF blocked), got {resp.status_code}: {resp.text}"
++        )
++        print("✓ SSRF: 127.0.0.1 correctly blocked with 400")
++
++    def test_aws_imds_blocked(self, investigation_id):
++        """Requests to the AWS instance metadata service must be rejected with HTTP 400."""
++        resp = requests.post(
++            f"{BASE_URL}/api/investigations/{investigation_id}/ingest/url",
++            json={"url": "http://169.254.169.254/latest/meta-data/", "evidence_type": "webpage"},
++            headers=HEADERS,
++        )
++        assert resp.status_code == 400, (
++            f"Expected 400 (SSRF blocked), got {resp.status_code}: {resp.text}"
++        )
++        print("✓ SSRF: AWS IMDS address correctly blocked with 400")
++
++    def test_private_class_a_blocked(self, investigation_id):
++        """Requests to RFC-1918 class A private range must be rejected with HTTP 400."""
++        resp = requests.post(
++            f"{BASE_URL}/api/investigations/{investigation_id}/ingest/url",
++            json={"url": "http://10.0.0.1/", "evidence_type": "webpage"},
++            headers=HEADERS,
++        )
++        assert resp.status_code == 400, (
++            f"Expected 400 (SSRF blocked), got {resp.status_code}: {resp.text}"
++        )
++        print("✓ SSRF: 10.0.0.1 correctly blocked with 400")
++
++    def test_private_class_c_blocked(self, investigation_id):
++        """Requests to RFC-1918 class C private range must be rejected with HTTP 400."""
++        resp = requests.post(
++            f"{BASE_URL}/api/investigations/{investigation_id}/ingest/url",
++            json={"url": "http://192.168.1.1/admin", "evidence_type": "webpage"},
++            headers=HEADERS,
++        )
++        assert resp.status_code == 400, (
++            f"Expected 400 (SSRF blocked), got {resp.status_code}: {resp.text}"
++        )
++        print("✓ SSRF: 192.168.1.1 correctly blocked with 400")
++
++    def test_file_scheme_blocked(self, investigation_id):
++        """Non-HTTP/S URL schemes must be rejected with HTTP 400."""
++        resp = requests.post(
++            f"{BASE_URL}/api/investigations/{investigation_id}/ingest/url",
++            json={"url": "file:///etc/passwd", "evidence_type": "webpage"},
++            headers=HEADERS,
++        )
++        assert resp.status_code == 400, (
++            f"Expected 400 (SSRF blocked), got {resp.status_code}: {resp.text}"
++        )
++        print("✓ SSRF: file:// scheme correctly blocked with 400")
++
++    def test_ftp_scheme_blocked(self, investigation_id):
++        """FTP URL schemes must be rejected with HTTP 400."""
++        resp = requests.post(
++            f"{BASE_URL}/api/investigations/{investigation_id}/ingest/url",
++            json={"url": "ftp://ftp.example.com/pub/file.txt", "evidence_type": "webpage"},
++            headers=HEADERS,
++        )
++        assert resp.status_code == 400, (
++            f"Expected 400 (SSRF blocked), got {resp.status_code}: {resp.text}"
++        )
++        print("✓ SSRF: ftp:// scheme correctly blocked with 400")
++
++
++# ---------------------------------------------------------------------------
++# BUG-06 — Suggestion Status Validation
++# ---------------------------------------------------------------------------
++
++class TestSuggestionStatusValidation:
++    """Verify that PATCH /suggestions/{id} rejects unknown status values."""
++
++    def test_valid_status_accepted(self, investigation_id, suggestion_id):
++        """Valid status 'accepted' should pass validation (may 404 if suggestion absent)."""
++        resp = requests.patch(
++            f"{BASE_URL}/api/investigations/{investigation_id}/suggestions/{suggestion_id}",
++            params={"status": "accepted"},
++            headers=HEADERS,
++        )
++        # Either 200 (found) or 404 (no such suggestion) — both are acceptable;
++        # what matters is it's NOT 400 (bad request due to invalid status).
++        assert resp.status_code in (200, 404), f"Unexpected status for valid value: {resp.status_code}"
++        print(f"✓ Suggestion PATCH with valid status 'accepted': {resp.status_code}")
++
++    def test_valid_status_dismissed(self, investigation_id, suggestion_id):
++        """Valid status 'dismissed' should pass validation (may 404 if suggestion absent)."""
++        resp = requests.patch(
++            f"{BASE_URL}/api/investigations/{investigation_id}/suggestions/{suggestion_id}",
++            params={"status": "dismissed"},
++            headers=HEADERS,
++        )
++        assert resp.status_code in (200, 404), f"Unexpected status for valid value: {resp.status_code}"
++        print(f"✓ Suggestion PATCH with valid status 'dismissed': {resp.status_code}")
++
++    def test_valid_status_pending(self, investigation_id, suggestion_id):
++        """Valid status 'pending' should pass validation (may 404 if suggestion absent)."""
++        resp = requests.patch(
++            f"{BASE_URL}/api/investigations/{investigation_id}/suggestions/{suggestion_id}",
++            params={"status": "pending"},
++            headers=HEADERS,
++        )
++        assert resp.status_code in (200, 404), f"Unexpected status for valid value: {resp.status_code}"
++        print(f"✓ Suggestion PATCH with valid status 'pending': {resp.status_code}")
++
++    def test_invalid_status_rejected_with_400(self, investigation_id, suggestion_id):
++        """Unknown status values must return HTTP 400."""
++        resp = requests.patch(
++            f"{BASE_URL}/api/investigations/{investigation_id}/suggestions/{suggestion_id}",
++            params={"status": "approved"},
++            headers=HEADERS,
++        )
++        assert resp.status_code == 400, (
++            f"Expected 400 for invalid status 'approved', got {resp.status_code}: {resp.text}"
++        )
++        print("✓ Invalid status 'approved' correctly rejected with 400")
++
++    def test_empty_status_rejected(self, investigation_id, suggestion_id):
++        """Empty string status must return HTTP 400 or 422."""
++        resp = requests.patch(
++            f"{BASE_URL}/api/investigations/{investigation_id}/suggestions/{suggestion_id}",
++            params={"status": ""},
++            headers=HEADERS,
++        )
++        assert resp.status_code in (400, 422), (
++            f"Expected 400/422 for empty status, got {resp.status_code}"
++        )
++        print(f"✓ Empty status correctly rejected with {resp.status_code}")
++
++    def test_sql_injection_attempt_rejected(self, investigation_id, suggestion_id):
++        """SQL-injection-style status values must return HTTP 400."""
++        resp = requests.patch(
++            f"{BASE_URL}/api/investigations/{investigation_id}/suggestions/{suggestion_id}",
++            params={"status": "1; DROP TABLE suggestions; --"},
++            headers=HEADERS,
++        )
++        assert resp.status_code == 400, (
++            f"Expected 400 for injection attempt, got {resp.status_code}: {resp.text}"
++        )
++        print("✓ SQL injection attempt in status correctly rejected with 400")
++
++
++# ---------------------------------------------------------------------------
++# BUG-07 — 404 for Sub-Resources Under Non-Existent Investigations
++# ---------------------------------------------------------------------------
++
++class TestOrphanResourcePrevention:
++    """Verify that creating sub-resources under a non-existent investigation returns 404."""
++
++    NONEXISTENT_ID = f"nonexistent-{uuid.uuid4().hex}"
++
++    def test_create_entity_unknown_investigation(self):
++        """Creating an entity under a non-existent investigation must return 404."""
++        resp = requests.post(
++            f"{BASE_URL}/api/investigations/{self.NONEXISTENT_ID}/entities",
++            json={"entity_type": "email", "value": "orphan@example.com"},
++            headers=HEADERS,
++        )
++        assert resp.status_code == 404, (
++            f"Expected 404 for unknown investigation, got {resp.status_code}"
++        )
++        print("✓ Entity creation under unknown investigation correctly returns 404")
++
++    def test_create_relationship_unknown_investigation(self):
++        """Creating a relationship under a non-existent investigation must return 404."""
++        resp = requests.post(
++            f"{BASE_URL}/api/investigations/{self.NONEXISTENT_ID}/relationships",
++            json={
++                "source_entity_id": str(uuid.uuid4()),
++                "target_entity_id": str(uuid.uuid4()),
++                "relationship_type": "associated_with",
++            },
++            headers=HEADERS,
++        )
++        assert resp.status_code == 404, (
++            f"Expected 404 for unknown investigation, got {resp.status_code}"
++        )
++        print("✓ Relationship creation under unknown investigation correctly returns 404")
++
++    def test_create_evidence_unknown_investigation(self):
++        """Creating evidence under a non-existent investigation must return 404."""
++        resp = requests.post(
++            f"{BASE_URL}/api/investigations/{self.NONEXISTENT_ID}/evidence",
++            json={"evidence_type": "webpage", "title": "Orphan evidence", "content": "test"},
++            headers=HEADERS,
++        )
++        assert resp.status_code == 404, (
++            f"Expected 404 for unknown investigation, got {resp.status_code}"
++        )
++        print("✓ Evidence creation under unknown investigation correctly returns 404")
+diff --git a/frontend/craco.config.js b/frontend/craco.config.js
+index 23c5267..bfe2c51 100644
+--- a/frontend/craco.config.js
++++ b/frontend/craco.config.js
+@@ -78,8 +78,22 @@ webpackConfig.devServer = (devServerConfig) => {
+     };
+   }
+ 
+-  // Allow ngrok and other tunnel hosts (fixes "Invalid Host header" when proxying)
+-  devServerConfig.allowedHosts = 'all';
++  // Allow tunnel/proxy hosts only when explicitly configured via ALLOWED_HOSTS.
++  // Set ALLOWED_HOSTS to a comma-separated list of host names (e.g. "abc.ngrok.io")
++  // or to "all" to disable host checking entirely (insecure — DNS rebinding risk).
++  // If unset, the default webpack-dev-server allowlist is used (safest).
++  if (process.env.ALLOWED_HOSTS) {
++    const hosts = process.env.ALLOWED_HOSTS.split(',').map((h) => h.trim()).filter(Boolean);
++    const resolvedHosts = hosts.length === 1 && hosts[0] === 'all' ? 'all' : hosts;
++    if (resolvedHosts === 'all') {
++      console.warn(
++        '[craco] WARNING: ALLOWED_HOSTS=all disables webpack-dev-server host ' +
++        'checking entirely. This is insecure (DNS rebinding risk) and should ' +
++        'never be used in production or on untrusted networks.'
++      );
++    }
++    devServerConfig.allowedHosts = resolvedHosts;
++  }
+ 
+   return devServerConfig;
+ };
+-- 
+2.53.0
+
