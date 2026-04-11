@@ -1,12 +1,21 @@
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+# ============================================================
+#  Trace Analyst — .gitignore
+# ============================================================
 
-# IDE and editors
-.idea/
-.vscode/
+# ── Environment files ────────────────────────────────────────
+# Never commit real .env files; always commit .env.example
+.env
+.env.*
+!.env.example
+frontend/.env
+frontend/.env.*
+!frontend/.env.example
+backend/.env
+backend/.env.*
+!backend/.env.example
 
-# Dependencies
+# ── Node / npm / yarn ────────────────────────────────────────
 node_modules/
-/node_modules
 /.pnp
 .pnp.js
 .yarn/install-state.gz
@@ -15,71 +24,112 @@ node_modules/
 !.yarn/plugins
 !.yarn/releases
 !.yarn/versions
+package-lock.json
+yarn-error.log
+npm-debug.log*
+yarn-debug.log*
+.pnpm-debug.log*
 
-# Testing
-/coverage
+# ── Python ───────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.Python
+venv/
+.venv/
+env/
+ENV/
+*.egg-info/
+dist/
+build/
+.eggs/
+pip-wheel-metadata/
+*.dist-info/
 
-# Next.js
-/.next/
+# ── Production builds ────────────────────────────────────────
+/build
+/dist
+frontend/build/
 /out/
+/.next/
 next-env.d.ts
 *.tsbuildinfo
 
-# Production builds
-/build
-dist/
-dist
+# ── Testing & coverage ───────────────────────────────────────
+/coverage
+.pytest_cache/
+.mypy_cache/
+.dmypy.json
+htmlcov/
+.tox/
+nosetests.xml
+coverage.xml
+*.cover
 
-# Environment files (comprehensive coverage)
+# ── IDE and editors ──────────────────────────────────────────
+.idea/
+.vscode/
+.cursor/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
 
-*token.json*
-*credentials.json*
-
-# Logs and debug files
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-.pnpm-debug.log*
-dump.rdb
-
-# System files
-.DS_Store
-*.pem
-
-# Python
-__pycache__/
-*pyc*
-venv/
-.venv/
-
-# Development tools
+# ── Emergent platform artifacts ──────────────────────────────
+.emergent/
+memory/
 chainlit.md
-.chainlit
+.chainlit/
 .ipynb_checkpoints/
-.ac
 
-# Deployment
+# ── Deployment ───────────────────────────────────────────────
 .vercel
 
-# Data and databases
-agenthub/agents/youtube/db
+# ── OS / system files ────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+*.pem
 
-# Archive files and large assets
-**/*.zip
-**/*.tar.gz
-**/*.tar
-**/*.tgz
+# ── Logs ─────────────────────────────────────────────────────
+*.log
+logs/
+dump.rdb
+
+# ── Archives and large assets ────────────────────────────────
+*.zip
+*.tar.gz
+*.tar
+*.tgz
 *.pack
 *.deb
 *.dylib
 
-# Build caches
-.cache/
+# ── Credentials and tokens ───────────────────────────────────
+*token.json*
+*credentials.json*
+*.p12
+*.pfx
+*.key
+service-account*.json
 
-# Mobile development
-android-sdk/ -e 
-# Environment files
-*.env
-*.env.*
-node_modules/
-package-lock.json
+# ── Build caches ─────────────────────────────────────────────
+.cache/
+.parcel-cache/
+.eslintcache
+.stylelintcache
+
+# ── Misc dev junk ────────────────────────────────────────────
+.ac
+/dy
+agenthub/
+android-sdk/

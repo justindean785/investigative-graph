@@ -1,18 +1,31 @@
 """
 Backend API Tests for OSINT Investigation Platform
-Tests: Investigations, Entities, Relationships, Evidence, Timeline, AI Analysis
+Tests: Investigations, Entities, Relationships, Evidence, Timeline, AI Analysis, Autonomous investigation
 """
+
+import os
+import sys
+import uuid
+from pathlib import Path
+
 import pytest
 import requests
-import os
-import uuid
+from fastapi.testclient import TestClient
 
-BASE_URL = os.environ.get('REACT_APP_BACKEND_URL', '').rstrip('/')
-API_KEY = "trace-analyst-secret-2026"
+BASE_URL = os.environ.get(
+    "BACKEND_URL", os.environ.get("REACT_APP_BACKEND_URL", "http://localhost:8001")
+).rstrip("/")
+API_KEY = os.environ.get("API_KEY", "")
+if not API_KEY:
+    raise SystemExit(
+        "ERROR: API_KEY environment variable is not set. "
+        "Set it to the value of API_KEY from backend/.env before running tests."
+    )
+
 
 class TestHealthAndAuth:
     """Test basic health and authentication"""
-    
+
     def test_api_root(self):
         """Test API root endpoint"""
         response = requests.get(f"{BASE_URL}/api/", headers={"x-api-key": API_KEY})
@@ -21,55 +34,56 @@ class TestHealthAndAuth:
         assert "message" in data
         assert "status" in data
         print(f"API root: {data}")
-    
+
+    def test_api_root_rejects_missing_key(self):
+        """Test API root requires x-api-key"""
+        response = requests.get(f"{BASE_URL}/api/")
+        assert response.status_code == 401
+
     def test_auth_with_valid_key(self):
         """Test authentication with valid API key"""
         response = requests.post(
-            f"{BASE_URL}/api/auth/validate",
-            headers={"x-api-key": API_KEY}
+            f"{BASE_URL}/api/auth/validate", headers={"x-api-key": API_KEY}
         )
         assert response.status_code == 200
         data = response.json()
         assert data["valid"] == True
         print("Valid API key accepted")
-    
+
     def test_auth_with_invalid_key(self):
-        """Test authentication with invalid API key"""
+        """Invalid API key is rejected with 401 (same as other protected routes)."""
         response = requests.post(
-            f"{BASE_URL}/api/auth/validate",
-            headers={"x-api-key": "invalid-key"}
+            f"{BASE_URL}/api/auth/validate", headers={"x-api-key": "invalid-key"}
         )
-        assert response.status_code == 200
-        data = response.json()
-        assert data["valid"] == False
-        print("Invalid API key rejected correctly")
+        assert response.status_code == 401
+        assert response.json().get("detail") == "Invalid API key"
+
 
 class TestInvestigations:
     """Test Investigation CRUD operations"""
-    
+
     def test_list_investigations(self):
         """Test listing all investigations"""
         response = requests.get(
-            f"{BASE_URL}/api/investigations",
-            headers={"x-api-key": API_KEY}
+            f"{BASE_URL}/api/investigations", headers={"x-api-key": API_KEY}
         )
         assert response.status_code == 200
         data = response.json()
         assert isinstance(data, list)
         print(f"Found {len(data)} investigations")
         return data
-    
+
     def test_create_investigation(self):
         """Test creating a new investigation"""
         payload = {
             "name": f"TEST_Investigation_{uuid.uuid4().hex[:8]}",
             "description": "Automated test investigation",
-            "tags": ["test", "automated"]
+            "tags": ["test", "automated"],
         }
         response = requests.post(
             f"{BASE_URL}/api/investigations",
             json=payload,
-            headers={"x-api-key": API_KEY, "Content-Type": "application/json"}
+            headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
         )
         assert response.status_code == 200
         data = response.json()
@@ -78,85 +92,83 @@ class TestInvestigations:
         assert data["description"] == payload["description"]
         print(f"Created investigation: {data['id']}")
         return data
-    
+
     def test_get_investigation_by_id(self):
         """Test getting investigation by ID"""
         # First create one
         created = self.test_create_investigation()
         inv_id = created["id"]
-        
+
         response = requests.get(
-            f"{BASE_URL}/api/investigations/{inv_id}",
-            headers={"x-api-key": API_KEY}
+            f"{BASE_URL}/api/investigations/{inv_id}", headers={"x-api-key": API_KEY}
         )
         assert response.status_code == 200
         data = response.json()
         assert data["id"] == inv_id
         print(f"Retrieved investigation: {data['name']}")
         return data
-    
+
     def test_update_investigation(self):
         """Test updating an investigation"""
         created = self.test_create_investigation()
         inv_id = created["id"]
-        
+
         update_payload = {
             "name": f"UPDATED_TEST_{uuid.uuid4().hex[:8]}",
-            "notes": "Updated notes from test"
+            "notes": "Updated notes from test",
         }
         response = requests.patch(
             f"{BASE_URL}/api/investigations/{inv_id}",
             json=update_payload,
-            headers={"x-api-key": API_KEY, "Content-Type": "application/json"}
+            headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
         )
         assert response.status_code == 200
         data = response.json()
         assert data["name"] == update_payload["name"]
         assert data["notes"] == update_payload["notes"]
         print(f"Updated investigation: {data['name']}")
-    
+
     def test_delete_investigation(self):
         """Test deleting an investigation"""
         created = self.test_create_investigation()
         inv_id = created["id"]
-        
+
         response = requests.delete(
-            f"{BASE_URL}/api/investigations/{inv_id}",
-            headers={"x-api-key": API_KEY}
+            f"{BASE_URL}/api/investigations/{inv_id}", headers={"x-api-key": API_KEY}
         )
         assert response.status_code == 200
-        
+
         # Verify it's deleted
         get_response = requests.get(
-            f"{BASE_URL}/api/investigations/{inv_id}",
-            headers={"x-api-key": API_KEY}
+            f"{BASE_URL}/api/investigations/{inv_id}", headers={"x-api-key": API_KEY}
         )
         assert get_response.status_code == 404
         print(f"Deleted investigation: {inv_id}")
 
+
 class TestEntities:
     """Test Entity CRUD operations"""
-    
+
     @pytest.fixture
     def investigation_id(self):
         """Create a test investigation for entity tests"""
         payload = {
             "name": f"TEST_EntityTest_{uuid.uuid4().hex[:8]}",
-            "description": "Test investigation for entities"
+            "description": "Test investigation for entities",
         }
         response = requests.post(
             f"{BASE_URL}/api/investigations",
             json=payload,
-            headers={"x-api-key": API_KEY, "Content-Type": "application/json"}
+            headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
         )
         data = response.json()
         yield data["id"]
         # Cleanup
         requests.delete(
             f"{BASE_URL}/api/investigations/{data['id']}",
-            headers={"x-api-key": API_KEY}
+            headers={"x-api-key": API_KEY},
         )
-    
+
     def test_create_entity(self, investigation_id):
         """Test creating a new entity"""
         payload = {
@@ -164,12 +176,12 @@ class TestEntities:
             "value": "test@example.com",
             "label": "Test Email",
             "confidence": 0.8,
-            "notes": "Test entity"
+            "notes": "Test entity",
         }
         response = requests.post(
             f"{BASE_URL}/api/investigations/{investigation_id}/entities",
             json=payload,
-            headers={"x-api-key": API_KEY, "Content-Type": "application/json"}
+            headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
         )
         assert response.status_code == 200
         data = response.json()
@@ -178,103 +190,104 @@ class TestEntities:
         assert data["value"] == payload["value"]
         print(f"Created entity: {data['id']} - {data['value']}")
         return data
-    
+
     def test_list_entities(self, investigation_id):
         """Test listing entities for an investigation"""
         # First create one
         self.test_create_entity(investigation_id)
-        
+
         response = requests.get(
             f"{BASE_URL}/api/investigations/{investigation_id}/entities",
-            headers={"x-api-key": API_KEY}
+            headers={"x-api-key": API_KEY},
         )
         assert response.status_code == 200
         data = response.json()
         assert isinstance(data, list)
         assert len(data) >= 1
         print(f"Found {len(data)} entities")
-    
+
     def test_delete_entity(self, investigation_id):
         """Test deleting an entity"""
         created = self.test_create_entity(investigation_id)
         entity_id = created["id"]
-        
+
         response = requests.delete(
             f"{BASE_URL}/api/investigations/{investigation_id}/entities/{entity_id}",
-            headers={"x-api-key": API_KEY}
+            headers={"x-api-key": API_KEY},
         )
         assert response.status_code == 200
         print(f"Deleted entity: {entity_id}")
 
+
 class TestRelationships:
     """Test Relationship operations"""
-    
+
     @pytest.fixture
     def setup_entities(self):
         """Create investigation with two entities for relationship tests"""
         # Create investigation
         inv_payload = {
             "name": f"TEST_RelTest_{uuid.uuid4().hex[:8]}",
-            "description": "Test for relationships"
+            "description": "Test for relationships",
         }
         inv_response = requests.post(
             f"{BASE_URL}/api/investigations",
             json=inv_payload,
-            headers={"x-api-key": API_KEY, "Content-Type": "application/json"}
+            headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
         )
         inv_data = inv_response.json()
         investigation_id = inv_data["id"]
-        
+
         # Create first entity
         entity1_payload = {
             "entity_type": "person",
             "value": "John Doe",
-            "label": "Subject 1"
+            "label": "Subject 1",
         }
         entity1_response = requests.post(
             f"{BASE_URL}/api/investigations/{investigation_id}/entities",
             json=entity1_payload,
-            headers={"x-api-key": API_KEY, "Content-Type": "application/json"}
+            headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
         )
         entity1_id = entity1_response.json()["id"]
-        
+
         # Create second entity
         entity2_payload = {
             "entity_type": "email",
             "value": "john@example.com",
-            "label": "Email"
+            "label": "Email",
         }
         entity2_response = requests.post(
             f"{BASE_URL}/api/investigations/{investigation_id}/entities",
             json=entity2_payload,
-            headers={"x-api-key": API_KEY, "Content-Type": "application/json"}
+            headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
         )
         entity2_id = entity2_response.json()["id"]
-        
+
         yield {
             "investigation_id": investigation_id,
             "entity1_id": entity1_id,
-            "entity2_id": entity2_id
+            "entity2_id": entity2_id,
         }
-        
+
         # Cleanup
         requests.delete(
             f"{BASE_URL}/api/investigations/{investigation_id}",
-            headers={"x-api-key": API_KEY}
+            headers={"x-api-key": API_KEY},
         )
-    
+
     def test_create_relationship(self, setup_entities):
         """Test creating a relationship between entities"""
         payload = {
             "source_entity_id": setup_entities["entity1_id"],
             "target_entity_id": setup_entities["entity2_id"],
             "relationship_type": "owns",
-            "label": "owns email"
+            "label": "owns email",
         }
         response = requests.post(
             f"{BASE_URL}/api/investigations/{setup_entities['investigation_id']}/relationships",
             json=payload,
-            headers={"x-api-key": API_KEY, "Content-Type": "application/json"}
+            headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
         )
         assert response.status_code == 200
         data = response.json()
@@ -283,15 +296,15 @@ class TestRelationships:
         assert data["target_entity_id"] == payload["target_entity_id"]
         print(f"Created relationship: {data['id']}")
         return data
-    
+
     def test_list_relationships(self, setup_entities):
         """Test listing relationships"""
         # Create one first
         self.test_create_relationship(setup_entities)
-        
+
         response = requests.get(
             f"{BASE_URL}/api/investigations/{setup_entities['investigation_id']}/relationships",
-            headers={"x-api-key": API_KEY}
+            headers={"x-api-key": API_KEY},
         )
         assert response.status_code == 200
         data = response.json()
@@ -299,40 +312,41 @@ class TestRelationships:
         assert len(data) >= 1
         print(f"Found {len(data)} relationships")
 
+
 class TestEvidence:
     """Test Evidence operations"""
-    
+
     @pytest.fixture
     def investigation_id(self):
         """Create test investigation for evidence tests"""
         payload = {
             "name": f"TEST_EvidenceTest_{uuid.uuid4().hex[:8]}",
-            "description": "Test investigation for evidence"
+            "description": "Test investigation for evidence",
         }
         response = requests.post(
             f"{BASE_URL}/api/investigations",
             json=payload,
-            headers={"x-api-key": API_KEY, "Content-Type": "application/json"}
+            headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
         )
         data = response.json()
         yield data["id"]
         requests.delete(
             f"{BASE_URL}/api/investigations/{data['id']}",
-            headers={"x-api-key": API_KEY}
+            headers={"x-api-key": API_KEY},
         )
-    
+
     def test_create_evidence(self, investigation_id):
         """Test adding evidence"""
         payload = {
             "evidence_type": "screenshot",
             "source_url": "https://example.com/evidence",
             "content": "Screenshot of suspicious activity",
-            "notes": "Captured at 14:00 UTC"
+            "notes": "Captured at 14:00 UTC",
         }
         response = requests.post(
             f"{BASE_URL}/api/investigations/{investigation_id}/evidence",
             json=payload,
-            headers={"x-api-key": API_KEY, "Content-Type": "application/json"}
+            headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
         )
         assert response.status_code == 200
         data = response.json()
@@ -340,60 +354,61 @@ class TestEvidence:
         assert data["evidence_type"] == payload["evidence_type"]
         print(f"Created evidence: {data['id']}")
         return data
-    
+
     def test_list_evidence(self, investigation_id):
         """Test listing evidence"""
         self.test_create_evidence(investigation_id)
-        
+
         response = requests.get(
             f"{BASE_URL}/api/investigations/{investigation_id}/evidence",
-            headers={"x-api-key": API_KEY}
+            headers={"x-api-key": API_KEY},
         )
         assert response.status_code == 200
         data = response.json()
         assert isinstance(data, list)
         assert len(data) >= 1
         print(f"Found {len(data)} evidence items")
-    
+
     def test_delete_evidence(self, investigation_id):
         """Test deleting evidence"""
         created = self.test_create_evidence(investigation_id)
         evidence_id = created["id"]
-        
+
         response = requests.delete(
             f"{BASE_URL}/api/investigations/{investigation_id}/evidence/{evidence_id}",
-            headers={"x-api-key": API_KEY}
+            headers={"x-api-key": API_KEY},
         )
         assert response.status_code == 200
         print(f"Deleted evidence: {evidence_id}")
 
+
 class TestTimeline:
     """Test Timeline operations"""
-    
+
     @pytest.fixture
     def investigation_id(self):
         """Create test investigation for timeline tests"""
         payload = {
             "name": f"TEST_TimelineTest_{uuid.uuid4().hex[:8]}",
-            "description": "Test investigation for timeline"
+            "description": "Test investigation for timeline",
         }
         response = requests.post(
             f"{BASE_URL}/api/investigations",
             json=payload,
-            headers={"x-api-key": API_KEY, "Content-Type": "application/json"}
+            headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
         )
         data = response.json()
         yield data["id"]
         requests.delete(
             f"{BASE_URL}/api/investigations/{data['id']}",
-            headers={"x-api-key": API_KEY}
+            headers={"x-api-key": API_KEY},
         )
-    
+
     def test_timeline_has_creation_event(self, investigation_id):
         """Test that timeline shows investigation creation event"""
         response = requests.get(
             f"{BASE_URL}/api/investigations/{investigation_id}/timeline",
-            headers={"x-api-key": API_KEY}
+            headers={"x-api-key": API_KEY},
         )
         assert response.status_code == 200
         data = response.json()
@@ -403,24 +418,21 @@ class TestTimeline:
         event_types = [e.get("event_type") for e in data]
         assert "investigation_created" in event_types
         print(f"Timeline has {len(data)} events")
-    
+
     def test_timeline_records_entity_addition(self, investigation_id):
         """Test that adding entity creates timeline event"""
         # Add an entity
-        entity_payload = {
-            "entity_type": "email",
-            "value": "timeline-test@example.com"
-        }
+        entity_payload = {"entity_type": "email", "value": "timeline-test@example.com"}
         requests.post(
             f"{BASE_URL}/api/investigations/{investigation_id}/entities",
             json=entity_payload,
-            headers={"x-api-key": API_KEY, "Content-Type": "application/json"}
+            headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
         )
-        
+
         # Check timeline
         response = requests.get(
             f"{BASE_URL}/api/investigations/{investigation_id}/timeline",
-            headers={"x-api-key": API_KEY}
+            headers={"x-api-key": API_KEY},
         )
         assert response.status_code == 200
         data = response.json()
@@ -428,129 +440,128 @@ class TestTimeline:
         assert "entity_added" in event_types
         print("Entity addition recorded in timeline")
 
+
 class TestOSINTSearch:
     """Test OSINT search endpoints"""
-    
+
     def test_email_search(self):
         """Test OSINT search for email"""
-        payload = {
-            "query": "test@example.com",
-            "search_type": "email"
-        }
+        payload = {"query": "test@example.com", "search_type": "email"}
         response = requests.post(
             f"{BASE_URL}/api/osint/search",
             json=payload,
-            headers={"x-api-key": API_KEY, "Content-Type": "application/json"}
+            headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
         )
         assert response.status_code == 200
         data = response.json()
         assert "results" in data
         assert data["query"] == payload["query"]
         print(f"OSINT search returned {len(data['results'])} results")
-    
+
     def test_domain_search(self):
         """Test OSINT search for domain"""
-        payload = {
-            "query": "example.com",
-            "search_type": "domain"
-        }
+        payload = {"query": "example.com", "search_type": "domain"}
         response = requests.post(
             f"{BASE_URL}/api/osint/search",
             json=payload,
-            headers={"x-api-key": API_KEY, "Content-Type": "application/json"}
+            headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
         )
         assert response.status_code == 200
         data = response.json()
         assert "results" in data
         print(f"Domain search returned {len(data['results'])} results")
 
+
 class TestAIAnalysis:
     """Test AI analysis endpoints - MOCKED API"""
-    
+
     @pytest.fixture
     def investigation_with_entities(self):
         """Create investigation with entities for AI analysis"""
         # Create investigation
         inv_payload = {
             "name": f"TEST_AITest_{uuid.uuid4().hex[:8]}",
-            "description": "Test for AI analysis"
+            "description": "Test for AI analysis",
         }
         inv_response = requests.post(
             f"{BASE_URL}/api/investigations",
             json=inv_payload,
-            headers={"x-api-key": API_KEY, "Content-Type": "application/json"}
+            headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
         )
         investigation_id = inv_response.json()["id"]
-        
+
         # Add entities
         entities = [
             {"entity_type": "person", "value": "Test Person"},
             {"entity_type": "email", "value": "test@suspicious.com"},
-            {"entity_type": "domain", "value": "suspicious.com"}
+            {"entity_type": "domain", "value": "suspicious.com"},
         ]
         for entity in entities:
             requests.post(
                 f"{BASE_URL}/api/investigations/{investigation_id}/entities",
                 json=entity,
-                headers={"x-api-key": API_KEY, "Content-Type": "application/json"}
+                headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
             )
-        
+
         yield investigation_id
-        
+
         requests.delete(
             f"{BASE_URL}/api/investigations/{investigation_id}",
-            headers={"x-api-key": API_KEY}
+            headers={"x-api-key": API_KEY},
         )
-    
+
     def test_ai_analyze_endpoint(self, investigation_with_entities):
         """Test AI analysis endpoint (may return suggestions or error based on API key)"""
         payload = {
             "investigation_id": investigation_with_entities,
             "mode": "flash",
-            "context": "Test analysis"
+            "context": "Test analysis",
         }
         response = requests.post(
             f"{BASE_URL}/api/ai/analyze",
             json=payload,
             headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
-            timeout=30
+            timeout=30,
         )
         # API may fail if no valid LLM key (500) or key not configured (503)
         assert response.status_code in [200, 500, 503]
         if response.status_code == 200:
             data = response.json()
             assert "success" in data
-            print(f"AI analysis success: {data.get('suggestions_count', 0)} suggestions")
+            print(
+                f"AI analysis success: {data.get('suggestions_count', 0)} suggestions"
+            )
         else:
             print("AI analysis endpoint responded (may need LLM key)")
 
+
 class TestReport:
     """Test report generation"""
-    
+
     @pytest.fixture
     def investigation_id(self):
         """Create test investigation for report tests"""
         payload = {
             "name": f"TEST_ReportTest_{uuid.uuid4().hex[:8]}",
-            "description": "Test investigation for report"
+            "description": "Test investigation for report",
         }
         response = requests.post(
             f"{BASE_URL}/api/investigations",
             json=payload,
-            headers={"x-api-key": API_KEY, "Content-Type": "application/json"}
+            headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
         )
         data = response.json()
         yield data["id"]
         requests.delete(
             f"{BASE_URL}/api/investigations/{data['id']}",
-            headers={"x-api-key": API_KEY}
+            headers={"x-api-key": API_KEY},
         )
-    
+
     def test_generate_report(self, investigation_id):
         """Test report generation endpoint"""
         response = requests.get(
             f"{BASE_URL}/api/investigations/{investigation_id}/report",
-            headers={"x-api-key": API_KEY}
+            headers={"x-api-key": API_KEY},
         )
         assert response.status_code == 200
         data = response.json()
@@ -571,18 +582,27 @@ class TestEntityUpdate:
         """Create investigation + entity for update tests."""
         inv_resp = requests.post(
             f"{BASE_URL}/api/investigations",
-            json={"name": f"TEST_EntityUpdate_{uuid.uuid4().hex[:8]}", "description": "entity update test"},
+            json={
+                "name": f"TEST_EntityUpdate_{uuid.uuid4().hex[:8]}",
+                "description": "entity update test",
+            },
             headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
         )
         inv = inv_resp.json()
         ent_resp = requests.post(
             f"{BASE_URL}/api/investigations/{inv['id']}/entities",
-            json={"entity_type": "email", "value": "original@example.com", "notes": "original note"},
+            json={
+                "entity_type": "email",
+                "value": "original@example.com",
+                "notes": "original note",
+            },
             headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
         )
         entity = ent_resp.json()
         yield inv["id"], entity["id"]
-        requests.delete(f"{BASE_URL}/api/investigations/{inv['id']}", headers={"x-api-key": API_KEY})
+        requests.delete(
+            f"{BASE_URL}/api/investigations/{inv['id']}", headers={"x-api-key": API_KEY}
+        )
 
     def test_patch_entity_notes(self, setup):
         """PATCH entity should update notes field."""
@@ -629,18 +649,27 @@ class TestEvidenceUpdate:
         """Create investigation + evidence for update tests."""
         inv_resp = requests.post(
             f"{BASE_URL}/api/investigations",
-            json={"name": f"TEST_EvidenceUpdate_{uuid.uuid4().hex[:8]}", "description": "evidence update test"},
+            json={
+                "name": f"TEST_EvidenceUpdate_{uuid.uuid4().hex[:8]}",
+                "description": "evidence update test",
+            },
             headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
         )
         inv = inv_resp.json()
         ev_resp = requests.post(
             f"{BASE_URL}/api/investigations/{inv['id']}/evidence",
-            json={"evidence_type": "document", "content": "some content", "notes": "original"},
+            json={
+                "evidence_type": "document",
+                "content": "some content",
+                "notes": "original",
+            },
             headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
         )
         evidence = ev_resp.json()
         yield inv["id"], evidence["id"]
-        requests.delete(f"{BASE_URL}/api/investigations/{inv['id']}", headers={"x-api-key": API_KEY})
+        requests.delete(
+            f"{BASE_URL}/api/investigations/{inv['id']}", headers={"x-api-key": API_KEY}
+        )
 
     def test_patch_evidence_tags(self, setup):
         """PATCH evidence should update tags field."""
@@ -677,7 +706,10 @@ class TestEntityDeduplication:
         """Create investigation with duplicate entities."""
         inv_resp = requests.post(
             f"{BASE_URL}/api/investigations",
-            json={"name": f"TEST_Dedup_{uuid.uuid4().hex[:8]}", "description": "dedup test"},
+            json={
+                "name": f"TEST_Dedup_{uuid.uuid4().hex[:8]}",
+                "description": "dedup test",
+            },
             headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
         )
         inv = inv_resp.json()
@@ -691,12 +723,18 @@ class TestEntityDeduplication:
         ).json()
         e2 = requests.post(
             f"{BASE_URL}/api/investigations/{inv_id}/entities",
-            json={"entity_type": "email", "value": "dup@example.com", "notes": "second"},
+            json={
+                "entity_type": "email",
+                "value": "dup@example.com",
+                "notes": "second",
+            },
             headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
         ).json()
 
         yield inv_id, e1["id"], e2["id"]
-        requests.delete(f"{BASE_URL}/api/investigations/{inv_id}", headers={"x-api-key": API_KEY})
+        requests.delete(
+            f"{BASE_URL}/api/investigations/{inv_id}", headers={"x-api-key": API_KEY}
+        )
 
     def test_find_duplicates(self, setup):
         """GET /entities/duplicates should return exact-match pair."""
@@ -748,7 +786,10 @@ class TestExport:
         """Create investigation with data for export tests."""
         inv_resp = requests.post(
             f"{BASE_URL}/api/investigations",
-            json={"name": f"TEST_Export_{uuid.uuid4().hex[:8]}", "description": "export test"},
+            json={
+                "name": f"TEST_Export_{uuid.uuid4().hex[:8]}",
+                "description": "export test",
+            },
             headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
         )
         inv = inv_resp.json()
@@ -760,7 +801,9 @@ class TestExport:
             headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
         )
         yield inv_id
-        requests.delete(f"{BASE_URL}/api/investigations/{inv_id}", headers={"x-api-key": API_KEY})
+        requests.delete(
+            f"{BASE_URL}/api/investigations/{inv_id}", headers={"x-api-key": API_KEY}
+        )
 
     def test_export_json(self, setup):
         """GET /export/json should return valid JSON with investigation data."""
@@ -779,7 +822,9 @@ class TestExport:
 
     def test_export_csv(self, setup):
         """GET /export/csv should return a ZIP file with CSV content."""
-        import io, zipfile
+        import io
+        import zipfile
+
         inv_id = setup
         resp = requests.get(
             f"{BASE_URL}/api/investigations/{inv_id}/export/csv",
@@ -807,6 +852,86 @@ class TestExport:
         assert "## Entities" in body
         print("Markdown export contains expected sections")
 
+
+def _backend_dir():
+    return Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(scope="module")
+def autonomous_client():
+    """In-process app + lifespan so routes match this checkout (no stale uvicorn)."""
+    backend_dir = str(_backend_dir())
+    if backend_dir not in sys.path:
+        sys.path.insert(0, backend_dir)
+    from server import app  # noqa: E402 — import after sys.path for backend package
+
+    with TestClient(app) as client:
+        yield client
+
+
+class TestAutonomousInvestigation:
+    """Autonomous investigation start + status endpoints."""
+
+    @pytest.fixture
+    def investigation_id(self, autonomous_client):
+        payload = {
+            "name": f"TEST_Auto_{uuid.uuid4().hex[:8]}",
+            "description": "Autonomous endpoint tests",
+        }
+        response = autonomous_client.post(
+            "/api/investigations",
+            json=payload,
+            headers={"x-api-key": API_KEY},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        inv_id = data["id"]
+        yield inv_id
+        autonomous_client.delete(
+            f"/api/investigations/{inv_id}",
+            headers={"x-api-key": API_KEY},
+        )
+
+    def test_auto_status_not_started(self, autonomous_client, investigation_id):
+        """GET auto-status before any run should report not_started when engine is up."""
+        response = autonomous_client.get(
+            f"/api/investigations/{investigation_id}/auto-status",
+            headers={"x-api-key": API_KEY},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data.get("engine_available") is True
+        assert data.get("status") == "not_started"
+
+    def test_auto_investigate_starts(self, autonomous_client, investigation_id):
+        """POST auto-investigate should accept seed and return stream hint."""
+        response = autonomous_client.post(
+            f"/api/investigations/{investigation_id}/auto-investigate",
+            json={
+                "seed_input": "test@example.com",
+                "max_depth": 2,
+                "max_entities": 20,
+                "confidence_threshold": 0.3,
+            },
+            headers={"x-api-key": API_KEY},
+        )
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data.get("success") is True
+        assert data.get("investigation_id") == investigation_id
+        assert "/stream" in (data.get("stream_url") or "")
+
+    def test_auto_investigate_404_unknown_investigation(self, autonomous_client):
+        """Unknown investigation id should 404."""
+        fake_id = str(uuid.uuid4())
+        response = autonomous_client.post(
+            f"/api/investigations/{fake_id}/auto-investigate",
+            json={"seed_input": "x"},
+            headers={"x-api-key": API_KEY},
+        )
+        assert response.status_code == 404
+
+
 # Cleanup test data
 @pytest.fixture(scope="session", autouse=True)
 def cleanup_test_data():
@@ -814,8 +939,7 @@ def cleanup_test_data():
     yield
     # Get all investigations
     response = requests.get(
-        f"{BASE_URL}/api/investigations",
-        headers={"x-api-key": API_KEY}
+        f"{BASE_URL}/api/investigations", headers={"x-api-key": API_KEY}
     )
     if response.status_code == 200:
         investigations = response.json()
@@ -823,6 +947,6 @@ def cleanup_test_data():
             if inv.get("name", "").startswith("TEST_"):
                 requests.delete(
                     f"{BASE_URL}/api/investigations/{inv['id']}",
-                    headers={"x-api-key": API_KEY}
+                    headers={"x-api-key": API_KEY},
                 )
                 print(f"Cleaned up: {inv['name']}")
