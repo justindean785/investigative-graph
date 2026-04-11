@@ -408,27 +408,62 @@ def extract_entities_from_text(
 # ---------------------------------------------------------------------------
 
 
-def is_safe_url(url: str) -> bool:
-    """Return True only if *url* does not resolve to a private/internal address."""
+def _is_ssrf_blocked_url(url: str) -> Optional[str]:
+    """Return a reason string if *url* targets a private/internal address, else None.
+
+    Uses socket.getaddrinfo() to resolve ALL addresses for a hostname (including
+    IPv6 and round-robin DNS entries) and rejects any that fall in a private,
+    loopback, link-local, or reserved range.  This is materially stronger than
+    gethostbyname() which returns only one IPv4 address and can be bypassed via
+    multi-A-record DNS tricks.
+
+    Replaces the weaker is_safe_url() helper that had three bypass vectors:
+      1. String-matching only caught "10." not 172.16.x.x / 192.168.x.x.
+      2. gethostbyname() returned a single IPv4 address only.
+      3. is_reserved was not checked.
+    """
     try:
         parsed = urlparse(url)
-        if not parsed.hostname:
-            return False
-        host = parsed.hostname.lower()
-        if any(
-            x in host for x in ["localhost", "127.0.0.1", "0.0.0.0", "internal", "10."]
-        ):
-            return False
-        ip = ipaddress.ip_address(socket.gethostbyname(host))
-        return not (ip.is_private or ip.is_loopback or ip.is_link_local)
-    except Exception:
-        return False
+        if parsed.scheme not in ("http", "https"):
+            return (
+                f"URL scheme '{parsed.scheme}' is not permitted. "
+                "Only http and https are allowed."
+            )
+        hostname = parsed.hostname
+        if not hostname:
+            return "URL has no hostname."
+        try:
+            addrinfos = socket.getaddrinfo(hostname, None)
+        except socket.gaierror:
+            return f"Could not resolve hostname: {hostname}"
+        for addrinfo in addrinfos:
+            ip_str = addrinfo[4][0]
+            try:
+                ip = ipaddress.ip_address(ip_str)
+                if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_reserved:
+                    return (
+                        f"Requests to private/internal addresses are not permitted "
+                        f"({ip_str})."
+                    )
+            except ValueError:
+                continue
+    except Exception as exc:
+        return f"URL validation error: {exc}"
+    return None
 
 
 async def fetch_url_content(url: str) -> Dict[str, Any]:
-    """Fetch and parse content from *url*.  Blocks SSRF via is_safe_url()."""
-    if not is_safe_url(url):
-        raise HTTPException(status_code=400, detail="URL not allowed")
+    """Fetch and parse content from *url*.  Blocks SSRF via _is_ssrf_blocked_url().
+
+    follow_redirects is intentionally False: an attacker who controls a
+    public URL could 302-redirect to http://169.254.169.254/ after the
+    initial hostname check passes.  With redirects disabled the check is
+    applied once and the response is the direct server reply only.
+    """
+    ssrf_reason = _is_ssrf_blocked_url(url)
+    if ssrf_reason:
+        logger.warning("Blocked SSRF attempt for URL %s: %s", url, ssrf_reason)
+        raise HTTPException(status_code=400, detail=ssrf_reason)
 
     result: Dict[str, Any] = {
         "success": False,
@@ -439,7 +474,7 @@ async def fetch_url_content(url: str) -> Dict[str, Any]:
     }
 
     try:
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as c:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as c:
             response = await c.get(
                 url,
                 headers={

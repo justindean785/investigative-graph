@@ -4,6 +4,7 @@ routers/stream.py — Autonomous investigation and SSE streaming endpoints.
 Routes (all nested under /api/investigations):
   POST /{investigation_id}/auto-investigate — start autonomous investigation
   GET  /{investigation_id}/auto-status      — poll investigation status
+  POST /{investigation_id}/stream-token     — issue short-lived SSE stream token
   GET  /{investigation_id}/stream           — SSE event stream
 
 SSE CRITICAL NOTES:
@@ -12,6 +13,15 @@ SSE CRITICAL NOTES:
   - investigation_event_queues is a module-level dict shared with the background task
   - The background task writes to every registered queue; the SSE handler reads one queue
   - A None sentinel signals completion to the SSE consumer
+
+SSE AUTHENTICATION:
+  The browser EventSource API cannot set custom headers, so the long-lived API
+  key cannot be sent via x-api-key for SSE connections.  Instead:
+    1. Call POST /{id}/stream-token (authenticated with x-api-key header) to
+       obtain a one-time, 60-second stream_token.
+    2. Open the SSE stream with ?stream_token=<token>.
+  The token is consumed on first use and expires after _STREAM_TOKEN_TTL_SECONDS.
+  Passing the long-lived API key directly as ?api_key is no longer supported.
 """
 
 from __future__ import annotations
@@ -19,7 +29,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Optional
+import time as _time
+import uuid
+from typing import Dict, Optional
 
 from core.deps import (
     db,
@@ -35,6 +47,22 @@ from sse_starlette.sse import EventSourceResponse
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/investigations", tags=["stream"])
+
+# ---------------------------------------------------------------------------
+# Short-lived stream tokens
+# token -> {"investigation_id": str, "expires_at": float (monotonic)}
+# ---------------------------------------------------------------------------
+
+_stream_tokens: Dict[str, dict] = {}
+_STREAM_TOKEN_TTL_SECONDS: int = 60
+
+
+def _purge_expired_stream_tokens() -> None:
+    """Remove expired tokens lazily to prevent unbounded dict growth."""
+    now = _time.monotonic()
+    expired = [t for t, v in _stream_tokens.items() if v["expires_at"] < now]
+    for t in expired:
+        _stream_tokens.pop(t, None)
 
 
 # ---------------------------------------------------------------------------
@@ -139,26 +167,64 @@ async def get_investigation_auto_status(
     }
 
 
+@router.post("/{investigation_id}/stream-token")
+async def issue_stream_token(
+    investigation_id: str,
+    x_api_key: str = Header(None),
+):
+    """Issue a short-lived one-time token for opening the SSE stream.
+
+    The token is valid for _STREAM_TOKEN_TTL_SECONDS seconds and is consumed
+    on first use, avoiding the need to expose the long-lived API key in the
+    EventSource URL (which would appear in browser history, server access logs,
+    and HTTP proxies/CDN logs).
+
+    Workflow:
+      1. POST /api/investigations/{id}/stream-token  (x-api-key header)
+         → {"stream_token": "<uuid>", "ttl_seconds": 60}
+      2. new EventSource(`/api/investigations/{id}/stream?stream_token=<token>`)
+    """
+    await validate_api_key(x_api_key)
+    _purge_expired_stream_tokens()
+    token = str(uuid.uuid4())
+    _stream_tokens[token] = {
+        "investigation_id": investigation_id,
+        "expires_at": _time.monotonic() + _STREAM_TOKEN_TTL_SECONDS,
+    }
+    return {"stream_token": token, "ttl_seconds": _STREAM_TOKEN_TTL_SECONDS}
+
+
 @router.get("/{investigation_id}/stream")
 async def stream_investigation_events(
     investigation_id: str,
     x_api_key: Optional[str] = Header(None),
-    api_key: Optional[str] = None,
+    stream_token: Optional[str] = None,
 ):
     """
     SSE stream of real-time investigation events.
 
-    Accepts the API key via either:
-      - x-api-key header  (standard)
-      - ?api_key query parameter  (used by EventSource which cannot set headers)
+    Authentication (exactly one must be provided):
+      - x-api-key header   — standard server-to-server usage
+      - ?stream_token      — short-lived one-time token from /stream-token endpoint,
+                             intended for browser EventSource connections
+
+    The ?api_key query parameter is no longer accepted.  Use /stream-token instead
+    to avoid exposing the long-lived API key in URLs.
 
     The generator yields events until a None sentinel is received from the
     background investigation task, then emits a 'completed' event and exits.
     """
-    key = x_api_key or api_key
-    if not key:
-        raise HTTPException(status_code=401, detail="Missing API key")
-    await validate_api_key(key)
+    if stream_token is not None:
+        _purge_expired_stream_tokens()
+        entry = _stream_tokens.pop(stream_token, None)
+        if entry is None or entry["expires_at"] < _time.monotonic():
+            raise HTTPException(status_code=401, detail="Invalid or expired stream token")
+        if entry["investigation_id"] != investigation_id:
+            raise HTTPException(status_code=403, detail="Stream token investigation mismatch")
+    elif x_api_key is not None:
+        await validate_api_key(x_api_key)
+    else:
+        raise HTTPException(status_code=401, detail="Missing authentication")
 
     queue: asyncio.Queue = asyncio.Queue(maxsize=256)
     investigation_event_queues.setdefault(investigation_id, []).append(queue)
