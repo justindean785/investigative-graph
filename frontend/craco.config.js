@@ -78,6 +78,9 @@ webpackConfig.devServer = (devServerConfig) => {
     };
   }
 
+  // Allow ngrok and other tunnel hosts (fixes "Invalid Host header" when proxying)
+  devServerConfig.allowedHosts = 'all';
+
   return devServerConfig;
 };
 
