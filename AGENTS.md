@@ -12,8 +12,15 @@ Trace Analyst is an AI-powered OSINT (Open Source Intelligence) investigation pl
 | Frontend | `cd /workspace/frontend && BROWSER=none yarn start` | 3000 | Requires `REACT_APP_BACKEND_URL=http://localhost:8001` (loaded from `frontend/.env`) |
 
 ### Environment files
-- `backend/.env` — Must contain `MONGO_URL=mongodb://localhost:27017` and `DB_NAME=trace_analyst`. Optional: `EMERGENT_LLM_KEY` for AI chat features.
-- `frontend/.env` — Must contain `REACT_APP_BACKEND_URL=http://localhost:8001`.
+- `backend/.env` — Must contain:
+  - `MONGO_URL=mongodb://localhost:27017` (required)
+  - `DB_NAME=trace_analyst` (required)
+  - `API_KEY=trace-analyst-secret-2026` (default, change in production)
+  - `CORS_ORIGINS=http://localhost:3000` (required, set to actual frontend URL in production)
+  - `EMERGENT_LLM_KEY` (optional, for AI chat features)
+- `frontend/.env` — Must contain:
+  - `REACT_APP_BACKEND_URL=http://localhost:8001` (required)
+  - `REACT_APP_API_KEY=trace-analyst-secret-2026` (required, must match backend API_KEY)
 
 ### Non-obvious caveats
 - The `emergentintegrations` Python package is a private Emergent platform package not available on PyPI. A local stub is installed from `/tmp/emergentintegrations_stub/` to satisfy the import. AI chat/suggestion features return a placeholder message without a real `EMERGENT_LLM_KEY`.
